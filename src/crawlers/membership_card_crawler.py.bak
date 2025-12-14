@@ -1,0 +1,1478 @@
+"""
+Meituan Membership Card Crawler
+
+Navigates to Marketing Center → Data Reports → Stored Value Payment Method Details
+to extract membership card transaction data.
+
+Navigation Path:
+1. Store selection page → Select store
+2. Click 营销中心 (Marketing Center)
+3. Expand 数据报表 (Data Reports)
+4. Click 储值支付方式明细表 (Stored Value Payment Method Details)
+5. Configure filters and extract data
+"""
+
+import asyncio
+import argparse
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeout, Error as PlaywrightError
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('membership_card_crawler.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+# Store configuration
+STORES = [
+    {"name": "宁桂杏山野烤肉（绵阳1958店）", "merchant_id": "56756952"},
+    {"name": "宁桂杏山野烤肉（常熟世贸店）", "merchant_id": "56728236"},
+    {"name": "野百灵·贵州酸汤火锅（1958店）", "merchant_id": "56799302"},
+    {"name": "宁桂杏山野烤肉（上马店）", "merchant_id": "58188193"},
+    {"name": "野百灵·贵州酸汤火锅（德阳店）", "merchant_id": "58121229"},
+    {"name": "宁桂杏山野烤肉（江油首店）", "merchant_id": "58325928"},
+]
+
+
+class MembershipCardCrawler:
+    """
+    Crawler for extracting membership card transaction data from Meituan backend.
+    """
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2  # seconds
+
+    # Timeout configuration
+    DEFAULT_TIMEOUT = 30000  # 30 seconds
+    NAVIGATION_TIMEOUT = 60000  # 60 seconds
+
+    def __init__(self, browser_manager, db_manager=None, dry_run: bool = False):
+        """
+        Initialize the crawler.
+
+        Args:
+            browser_manager: BrowserManager instance for session management
+            db_manager: DatabaseManager instance for data persistence (optional)
+            dry_run: If True, don't save to database
+        """
+        self.browser = browser_manager
+        self.db = db_manager
+        self.dry_run = dry_run
+
+    async def run(
+        self,
+        store_filter: Optional[str] = None,
+        start_date: str = "2015-11-01",
+        end_date: str = "2025-11-30"
+    ) -> Dict[str, any]:
+        """
+        Main entry point - crawls all stores or a specific store.
+
+        Args:
+            store_filter: Optional merchant ID to crawl only one store
+            start_date: Start date for data extraction (YYYY-MM-DD)
+            end_date: End date for data extraction (YYYY-MM-DD)
+
+        Returns:
+            Dictionary with crawl results and statistics
+        """
+        logger.info("=" * 80)
+        logger.info("Starting Membership Card Crawler")
+        logger.info(f"Date range: {start_date} to {end_date}")
+        logger.info(f"Dry run mode: {self.dry_run}")
+        logger.info("=" * 80)
+
+        results = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "total_records": 0,
+            "start_time": datetime.now().isoformat()
+        }
+
+        # Filter stores if specified
+        stores_to_crawl = STORES
+        if store_filter:
+            stores_to_crawl = [s for s in STORES if s["merchant_id"] == store_filter]
+            if not stores_to_crawl:
+                logger.error(f"Store with merchant ID {store_filter} not found")
+                return results
+
+        # Get browser page
+        page = await self.browser.get_page()
+
+        # Crawl each store
+        for idx, store in enumerate(stores_to_crawl, 1):
+            logger.info(f"\n{'=' * 80}")
+            logger.info(f"Processing store {idx}/{len(stores_to_crawl)}: {store['name']}")
+            logger.info(f"Merchant ID: {store['merchant_id']}")
+            logger.info(f"{'=' * 80}")
+
+            try:
+                # Crawl store data
+                store_result = await self.crawl_store(
+                    page,
+                    store["merchant_id"],
+                    store["name"],
+                    start_date,
+                    end_date
+                )
+
+                if store_result["success"]:
+                    results["success"].append({
+                        "store": store["name"],
+                        "merchant_id": store["merchant_id"],
+                        "records": store_result["records_count"]
+                    })
+                    results["total_records"] += store_result["records_count"]
+                else:
+                    results["failed"].append({
+                        "store": store["name"],
+                        "merchant_id": store["merchant_id"],
+                        "error": store_result.get("error", "Unknown error")
+                    })
+
+            except Exception as e:
+                logger.error(f"Failed to crawl store {store['name']}: {e}", exc_info=True)
+                results["failed"].append({
+                    "store": store["name"],
+                    "merchant_id": store["merchant_id"],
+                    "error": str(e)
+                })
+
+            # Brief pause between stores
+            if idx < len(stores_to_crawl):
+                await asyncio.sleep(2)
+
+        results["end_time"] = datetime.now().isoformat()
+        self._log_summary(results)
+        return results
+
+    async def crawl_store(
+        self,
+        page: Page,
+        merchant_id: str,
+        store_name: str,
+        start_date: str,
+        end_date: str
+    ) -> Dict[str, any]:
+        """
+        Crawl membership card data for a single store.
+
+        Args:
+            page: Playwright page object
+            merchant_id: Merchant/store ID
+            store_name: Store name for logging
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+
+        Returns:
+            Dictionary with crawl results
+        """
+        result = {"success": False, "records_count": 0, "error": None}
+
+        try:
+            # Step 1: Select the store
+            logger.info(f"Selecting store: {store_name}")
+            if not await self._select_store_with_retry(page, merchant_id):
+                result["error"] = "Failed to select store"
+                return result
+
+            # Step 2: Navigate to Marketing Center
+            logger.info("Navigating to Marketing Center...")
+            if not await self._navigate_to_marketing_center(page):
+                result["error"] = "Failed to navigate to Marketing Center"
+                return result
+
+            # Step 3: Navigate to the report page
+            logger.info("Navigating to 储值支付方式明细表 report...")
+            if not await self._navigate_to_report(page):
+                result["error"] = "Failed to navigate to report page"
+                return result
+
+            # Step 4: Configure report filters
+            logger.info(f"Configuring report filters (date range: {start_date} to {end_date})...")
+            if not await self._configure_report_filters(page, start_date, end_date):
+                result["error"] = "Failed to configure report filters"
+                return result
+
+            # Step 5: Extract data
+            logger.info("Extracting membership card data...")
+            records = await self._extract_all_data(page, merchant_id, store_name)
+
+            result["success"] = True
+            result["records_count"] = len(records)
+            logger.info(f"Successfully extracted {len(records)} records for {store_name}")
+
+        except Exception as e:
+            logger.error(f"Error crawling store {store_name}: {e}", exc_info=True)
+            result["error"] = str(e)
+
+        return result
+
+    async def _select_store_with_retry(self, page: Page, merchant_id: str) -> bool:
+        """
+        Select store with retry logic.
+
+        Args:
+            page: Playwright page object
+            merchant_id: Merchant ID to select
+
+        Returns:
+            True if successful, False otherwise
+        """
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                # Navigate to store selection page
+                await page.goto(
+                    self.browser.STORE_SELECTION_URL,
+                    wait_until='networkidle',
+                    timeout=self.NAVIGATION_TIMEOUT
+                )
+
+                # Wait for page to stabilize
+                await asyncio.sleep(2)
+
+                # Dismiss any tutorial popups
+                await self._dismiss_popups(page)
+
+                # Try to find and click the store selection button
+                # Method 1: Find by merchant ID in text
+                store_card = await page.query_selector(f'text="{merchant_id}"')
+                if store_card:
+                    # Find the "选 择" button in the same card
+                    parent = await store_card.evaluate_handle('el => el.closest("div[class*=card], div[class*=item]")')
+                    select_button = await parent.query_selector('button:has-text("选")')
+                    if select_button:
+                        await select_button.click()
+                        logger.info(f"Clicked store selection button for merchant {merchant_id}")
+                        await asyncio.sleep(3)  # Wait for navigation
+                        return True
+
+                # Method 2: Search by merchant ID and select
+                search_input = await page.query_selector('input[placeholder*="机构名称"]')
+                if search_input:
+                    await search_input.fill(merchant_id)
+                    await asyncio.sleep(1)
+
+                    # Click search button
+                    search_button = await page.query_selector('button[aria-label="search"]')
+                    if search_button:
+                        await search_button.click()
+                        await asyncio.sleep(2)
+
+                    # Now try to find the select button
+                    select_buttons = await page.query_selector_all('button:has-text("选")')
+                    if select_buttons:
+                        await select_buttons[0].click()
+                        logger.info(f"Selected store via search for merchant {merchant_id}")
+                        await asyncio.sleep(3)
+                        return True
+
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES}: Could not find store {merchant_id}")
+
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}")
+
+            if attempt < self.MAX_RETRIES - 1:
+                await asyncio.sleep(self.RETRY_DELAY)
+
+        return False
+
+    async def _navigate_to_marketing_center(self, page: Page) -> bool:
+        """
+        Navigate to Marketing Center from current page.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Navigate directly to the report URL
+        REPORT_URL = "https://pos.meituan.com/web/marketing/crm/report/dpaas-summary-payment"
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                logger.info(f"Navigating directly to report URL: {REPORT_URL}")
+                await page.goto(REPORT_URL, wait_until='networkidle', timeout=60000)
+
+                # Wait for page to stabilize
+                await asyncio.sleep(3)
+
+                # Dismiss any popups
+                await self._dismiss_popups(page)
+
+                # Verify we're on the report page
+                if "marketing" in page.url or "crm" in page.url:
+                    logger.info(f"Successfully navigated to report page: {page.url}")
+                    return True
+
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES}: URL doesn't match expected")
+
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}")
+
+            if attempt < self.MAX_RETRIES - 1:
+                await asyncio.sleep(self.RETRY_DELAY)
+
+        return False
+
+    async def _navigate_to_report(self, page: Page) -> bool:
+        """
+        Navigate to 储值支付方式明细表 report.
+        Since we now navigate directly via URL, just verify we're on the report page.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Dismiss any popups
+            await self._dismiss_popups(page)
+
+            # Wait for the report page iframe to load
+            await asyncio.sleep(2)
+
+            # Check if we can see the report content
+            logger.info(f"On report page: {page.url}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Report verification failed: {e}")
+
+        return False
+
+    async def _configure_report_filters(
+        self,
+        page: Page,
+        start_date: str,
+        end_date: str
+    ) -> bool:
+        """
+        Configure report filters: dimension, date range, card type.
+
+        Workflow:
+        1. Click "日期" radio for statistics dimension
+        2. Click "展开筛选" button to expand filter options
+        3. Set date range
+        4. Set card type filters (会员卡, 山海会员)
+        5. Click "查询" button
+
+        Args:
+            page: Playwright page object
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Wait for form elements to load
+            await asyncio.sleep(3)
+            await self._dismiss_popups(page)
+
+            # Find the iframe containing the report (skip main frame)
+            frame = None
+            main_url = page.url
+            for f in page.frames:
+                if f.url == main_url:
+                    continue
+                if 'crm-smart' in f.url:
+                    frame = f
+                    logger.info(f"Found crm-smart iframe: {f.url}")
+                    break
+
+            if not frame:
+                logger.warning("No crm-smart iframe found, using main page")
+                frame = page
+
+            await asyncio.sleep(2)
+
+            # ============================================================
+            # Step 1: Click "日期" radio button for statistics dimension
+            # ============================================================
+            logger.info("Step 1: Selecting 统计维度: 日期")
+
+            # Use saas-specific selectors based on exploration results
+            date_radio = await frame.query_selector('.saas-radio-button-wrapper:has-text("日期")')
+            if date_radio:
+                is_visible = await date_radio.is_visible()
+                if is_visible:
+                    await date_radio.click()
+                    logger.info("Clicked 日期 radio button")
+                else:
+                    logger.warning("日期 radio found but not visible")
+            else:
+                # Fallback: try JavaScript click
+                logger.info("Trying JavaScript click for 日期 radio")
+                await frame.evaluate('''() => {
+                    const wrappers = document.querySelectorAll('.saas-radio-button-wrapper');
+                    for (const w of wrappers) {
+                        if (w.textContent.includes('日期')) {
+                            w.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }''')
+
+            await asyncio.sleep(1)
+
+            # ============================================================
+            # Step 2: Click "展开筛选" button to expand filter options
+            # IMPORTANT: This button reveals 卡种类 and 卡类型 dropdowns
+            # ============================================================
+            logger.info("Step 2: Clicking 展开筛选 button to reveal card type filters")
+
+            # Try multiple selectors for the expand button
+            expand_btn = await frame.query_selector('button:has-text("展开筛选")')
+            if not expand_btn:
+                expand_btn = await frame.query_selector('button.saas-btn-link:has-text("展开")')
+            if not expand_btn:
+                expand_btn = await frame.query_selector('span:has-text("展开筛选")')
+            if not expand_btn:
+                # Try finding via JavaScript
+                expand_btn = await frame.evaluate('''() => {
+                    const btns = document.querySelectorAll('button, span');
+                    for (const b of btns) {
+                        if (b.textContent.includes('展开筛选')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }''')
+
+            if expand_btn:
+                if isinstance(expand_btn, bool):
+                    # Found via JavaScript, click via JavaScript
+                    clicked = await frame.evaluate('''() => {
+                        const btns = document.querySelectorAll('button, span');
+                        for (const b of btns) {
+                            if (b.textContent.includes('展开筛选')) {
+                                b.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }''')
+                    if clicked:
+                        logger.info("Clicked 展开筛选 via JavaScript")
+                    else:
+                        logger.warning("Failed to click 展开筛选 via JavaScript")
+                else:
+                    is_visible = await expand_btn.is_visible()
+                    if is_visible:
+                        await expand_btn.click()
+                        logger.info("Clicked 展开筛选 button")
+                    else:
+                        logger.warning("展开筛选 button found but not visible, trying JavaScript")
+                        await frame.evaluate('''() => {
+                            const btns = document.querySelectorAll('button');
+                            for (const b of btns) {
+                                if (b.textContent.includes('展开筛选')) {
+                                    b.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }''')
+                        logger.info("Attempted 展开筛选 click via JavaScript")
+
+                await asyncio.sleep(2)  # Wait for filter section to expand
+            else:
+                # Check if filters might already be expanded (收起筛选 visible)
+                collapse_btn = await frame.query_selector('button:has-text("收起筛选"), span:has-text("收起筛选")')
+                if collapse_btn:
+                    logger.info("Filters already expanded (收起筛选 button found)")
+                else:
+                    logger.warning("展开筛选 button not found - filters may need to be expanded manually")
+
+            await asyncio.sleep(1)
+
+            # ============================================================
+            # Step 3: Set date range using simple fill() approach
+            # ============================================================
+            logger.info(f"Step 3: Setting date range: {start_date} to {end_date}")
+
+            # Format dates for the input (YYYY/MM/DD format)
+            start_formatted = start_date.replace('-', '/')
+            end_formatted = end_date.replace('-', '/')
+
+            # Find date inputs using the exact placeholders
+            start_input = await frame.query_selector('input[placeholder="开始日期"]')
+            end_input = await frame.query_selector('input[placeholder="结束日期"]')
+
+            if start_input and end_input:
+                try:
+                    # Simple approach: click to open calendar, then fill the value
+                    logger.info(f"Setting start date: {start_formatted}")
+                    await start_input.click()
+                    await asyncio.sleep(0.5)
+
+                    # Use fill() to set the date value
+                    await start_input.fill(start_formatted)
+                    await asyncio.sleep(0.3)
+
+                    # Press Tab to move to end date (this also confirms start date)
+                    await page.keyboard.press('Tab')
+                    await asyncio.sleep(0.3)
+
+                    # Set end date
+                    logger.info(f"Setting end date: {end_formatted}")
+                    await end_input.fill(end_formatted)
+                    await asyncio.sleep(0.3)
+
+                    # Press Enter to confirm the date range
+                    await page.keyboard.press('Enter')
+                    await asyncio.sleep(0.5)
+
+                    # Close any remaining calendar popups
+                    await page.keyboard.press('Escape')
+                    await asyncio.sleep(0.3)
+
+                    # Verify date values
+                    verify_dates = await frame.evaluate('''() => {
+                        const startInput = document.querySelector('input[placeholder="开始日期"]');
+                        const endInput = document.querySelector('input[placeholder="结束日期"]');
+                        return {
+                            start: startInput ? startInput.value : 'N/A',
+                            end: endInput ? endInput.value : 'N/A'
+                        };
+                    }''')
+                    logger.info(f"Date range verified: start={verify_dates['start']}, end={verify_dates['end']}")
+
+                except Exception as date_error:
+                    logger.warning(f"Error setting dates via fill(): {date_error}")
+                    # Fallback: try clicking calendar dates directly
+                    logger.info("Trying fallback: clicking calendar dates directly")
+                    await self._set_dates_via_calendar(frame, page, start_date, end_date)
+            else:
+                logger.warning("Date inputs not found, continuing with defaults")
+
+            await asyncio.sleep(1)
+
+            # ============================================================
+            # Step 4: Set card type filters (卡种类 = 会员卡, 卡类型 = 山海会员)
+            # IMPORTANT: 卡类型 dropdown only appears AFTER selecting 会员卡
+            # This is a cascading dependency - must handle sequentially
+            # ============================================================
+            logger.info("Step 4: Setting card type filters")
+
+            try:
+                # Step 4a: Find and click the first dropdown (卡种类)
+                logger.info("Step 4a: Opening 卡种类 dropdown")
+                card_category_selectors = await frame.query_selector_all('.saas-select.saas-tree-select')
+                logger.info(f"Found {len(card_category_selectors)} tree select elements initially")
+
+                if len(card_category_selectors) >= 1:
+                    first_selector = card_category_selectors[0]
+                    is_visible = await first_selector.is_visible()
+                    if is_visible:
+                        await first_selector.click()
+                        logger.info("Clicked 卡种类 dropdown")
+                        await asyncio.sleep(1)
+
+                        # Step 4b: Select 会员卡 from dropdown
+                        logger.info("Step 4b: Selecting 会员卡")
+                        member_card_option = await frame.query_selector('.saas-select-tree-treenode-checkbox-checked + span:has-text("会员卡"), .saas-select-tree-treenode:has-text("会员卡")')
+                        if not member_card_option:
+                            # Try finding by text content in tree node
+                            member_card_option = await frame.evaluate('''() => {
+                                const nodes = document.querySelectorAll('.saas-select-tree-treenode');
+                                for (const node of nodes) {
+                                    if (node.textContent.includes('会员卡') && !node.textContent.includes('匿名')) {
+                                        node.click();
+                                        return true;
+                                    }
+                                }
+                                // Try title nodes
+                                const titles = document.querySelectorAll('.saas-select-tree-node-content-wrapper');
+                                for (const title of titles) {
+                                    if (title.textContent.trim() === '会员卡') {
+                                        title.click();
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }''')
+                            if member_card_option:
+                                logger.info("Selected 会员卡 via JavaScript")
+                            else:
+                                logger.warning("会员卡 option not found via JavaScript")
+                        else:
+                            await member_card_option.click()
+                            logger.info("Selected 会员卡 via selector")
+
+                        await asyncio.sleep(1)
+
+                        # Close the dropdown by clicking outside or pressing Escape
+                        await page.keyboard.press('Escape')
+                        await asyncio.sleep(1)
+                    else:
+                        logger.warning("卡种类 dropdown found but not visible")
+                else:
+                    logger.warning("No tree select elements found for 卡种类")
+
+                # Step 4c: Wait for 卡类型 dropdown to appear (cascading dependency)
+                # After selecting 会员卡, the 卡类型 dropdown should now render
+                logger.info("Step 4c: Waiting for 卡类型 dropdown to appear...")
+                await asyncio.sleep(2)
+
+                # Re-query for tree-select elements - should now have 2
+                card_type_selectors = await frame.query_selector_all('.saas-select.saas-tree-select')
+                logger.info(f"Found {len(card_type_selectors)} tree select elements after selecting 会员卡")
+
+                if len(card_type_selectors) >= 2:
+                    # Step 4d: Click the second dropdown (卡类型)
+                    logger.info("Step 4d: Opening 卡类型 dropdown")
+                    second_selector = card_type_selectors[1]
+                    is_visible = await second_selector.is_visible()
+                    if is_visible:
+                        await second_selector.click()
+                        logger.info("Clicked 卡类型 dropdown")
+                        await asyncio.sleep(1)
+
+                        # Step 4e: Select 山海会员
+                        logger.info("Step 4e: Selecting 山海会员")
+                        shanhai_option = await frame.evaluate('''() => {
+                            const nodes = document.querySelectorAll('.saas-select-tree-treenode');
+                            for (const node of nodes) {
+                                if (node.textContent.includes('山海会员')) {
+                                    node.click();
+                                    return true;
+                                }
+                            }
+                            // Try title nodes
+                            const titles = document.querySelectorAll('.saas-select-tree-node-content-wrapper');
+                            for (const title of titles) {
+                                if (title.textContent.includes('山海会员')) {
+                                    title.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }''')
+
+                        if shanhai_option:
+                            logger.info("Selected 山海会员")
+                        else:
+                            logger.warning("山海会员 option not found")
+
+                        await asyncio.sleep(0.5)
+
+                        # Close dropdown
+                        await page.keyboard.press('Escape')
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.warning("卡类型 dropdown found but not visible")
+                else:
+                    logger.warning(f"卡类型 dropdown not found - only {len(card_type_selectors)} tree selects available")
+                    logger.warning("This may indicate 会员卡 was not properly selected")
+
+            except Exception as e:
+                logger.warning(f"Error setting card type filters: {e}", exc_info=True)
+
+            await asyncio.sleep(1)
+
+            # Close any open popups
+            try:
+                await page.keyboard.press('Escape')
+                await asyncio.sleep(0.3)
+            except:
+                pass
+
+            # ============================================================
+            # Step 5: Click "查询" button
+            # ============================================================
+            logger.info("Step 5: Clicking 查询 button")
+
+            query_button = await frame.query_selector('button:has-text("查询")')
+            if not query_button:
+                query_button = await frame.query_selector('button.saas-btn-primary')
+
+            if query_button:
+                is_visible = await query_button.is_visible()
+                if is_visible:
+                    try:
+                        await query_button.click(timeout=5000)
+                        logger.info("Query submitted")
+                    except Exception as click_error:
+                        logger.warning(f"Normal click failed: {click_error}, trying force click")
+                        await query_button.click(force=True)
+                        logger.info("Query submitted via force click")
+                else:
+                    # JavaScript fallback
+                    await frame.evaluate('''() => {
+                        const btns = document.querySelectorAll('button');
+                        for (const b of btns) {
+                            if (b.textContent.includes('查询')) {
+                                b.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }''')
+                    logger.info("Query submitted via JavaScript")
+
+                await asyncio.sleep(5)  # Wait for results to load
+                return True
+            else:
+                logger.error("Could not find 查询 button")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error configuring report filters: {e}", exc_info=True)
+            return False
+
+    async def _extract_all_data(
+        self,
+        page: Page,
+        merchant_id: str,
+        store_name: str
+    ) -> List[Dict]:
+        """
+        Extract all membership card data from the report table.
+
+        Table structure (储值支付方式明细表):
+        - 序号: Row number
+        - 店铺: Store name
+        - 法人: Legal entity
+        - 分公司: Branch
+        - 市场: Market
+        - 机构编码: Organization code
+        - 交易机构ID: Transaction org ID
+        - 净储值金额_充值: Net stored value (本金, 赠金, 合计)
+        - 结账方式_充值: Payment method (checkout)
+        - 操作: Actions (查看订单明细)
+
+        Args:
+            page: Playwright page object
+            merchant_id: Merchant ID
+            store_name: Store name
+
+        Returns:
+            List of extracted records
+        """
+        all_records = []
+
+        try:
+            # Wait for table to load
+            await asyncio.sleep(3)
+
+            # Find the correct frame
+            frame = page
+            main_url = page.url
+            for f in page.frames:
+                if f.url == main_url:
+                    continue
+                if 'crm-smart' in f.url:
+                    frame = f
+                    logger.info(f"Using crm-smart iframe for data extraction: {f.url}")
+                    break
+
+            # Check for "暂无数据" (no data)
+            no_data = await frame.query_selector('.saas-v5-table-placeholder, .saas-empty, :has-text("暂无数据")')
+            if no_data:
+                try:
+                    no_data_text = await no_data.inner_text()
+                    if '暂无数据' in no_data_text:
+                        logger.warning("Table shows '暂无数据' - no data available for this query")
+                        return all_records
+                except:
+                    pass
+
+            # Extract summary data from the table using JavaScript
+            # This handles the complex SAAS table structure
+            table_data = await frame.evaluate('''() => {
+                const result = {
+                    rows: [],
+                    pagination: {
+                        total: 0,
+                        currentPage: 1,
+                        pageSize: 20
+                    }
+                };
+
+                // Find pagination info
+                const paginationText = document.body.innerText.match(/共 (\\d+) 条记录/);
+                if (paginationText) {
+                    result.pagination.total = parseInt(paginationText[1]);
+                }
+
+                // Find table rows (excluding header and footer rows)
+                const tbody = document.querySelector('.saas-v5-table-tbody');
+                if (!tbody) {
+                    // Try alternate selector
+                    const table = document.querySelector('.saas-v5-table');
+                    if (table) {
+                        const rows = table.querySelectorAll('tbody tr');
+                        for (const row of rows) {
+                            const cells = row.querySelectorAll('td');
+                            if (cells.length > 0) {
+                                result.rows.push({
+                                    index: cells[0]?.innerText?.trim() || '',
+                                    store: cells[1]?.innerText?.trim() || '',
+                                    legalEntity: cells[2]?.innerText?.trim() || '',
+                                    branch: cells[3]?.innerText?.trim() || '',
+                                    market: cells[4]?.innerText?.trim() || '',
+                                    orgCode: cells[5]?.innerText?.trim() || '',
+                                    txOrgId: cells[6]?.innerText?.trim() || '',
+                                    principal: cells[7]?.innerText?.trim() || '0',
+                                    bonus: cells[8]?.innerText?.trim() || '0',
+                                    total: cells[9]?.innerText?.trim() || '0'
+                                });
+                            }
+                        }
+                    }
+                    return result;
+                }
+
+                const rows = tbody.querySelectorAll('tr:not(.saas-v5-table-measure-row)');
+                for (const row of rows) {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length > 0) {
+                        // Skip the "合计" (total) row
+                        const firstCell = cells[0]?.innerText?.trim();
+                        if (firstCell === '合计') continue;
+
+                        result.rows.push({
+                            index: firstCell || '',
+                            store: cells[1]?.innerText?.trim() || '',
+                            legalEntity: cells[2]?.innerText?.trim() || '',
+                            branch: cells[3]?.innerText?.trim() || '',
+                            market: cells[4]?.innerText?.trim() || '',
+                            orgCode: cells[5]?.innerText?.trim() || '',
+                            txOrgId: cells[6]?.innerText?.trim() || '',
+                            principal: cells[7]?.innerText?.trim() || '0',
+                            bonus: cells[8]?.innerText?.trim() || '0',
+                            total: cells[9]?.innerText?.trim() || '0'
+                        });
+                    }
+                }
+
+                return result;
+            }''')
+
+            logger.info(f"Found {len(table_data.get('rows', []))} data rows, total records: {table_data.get('pagination', {}).get('total', 0)}")
+
+            # Process each row
+            for idx, row_data in enumerate(table_data.get('rows', []), 1):
+                try:
+                    # Skip empty rows or total rows
+                    if not row_data.get('store') or row_data.get('index') == '合计':
+                        continue
+
+                    # Parse amounts
+                    principal = self._parse_number(row_data.get('principal', '0'))
+                    bonus = self._parse_number(row_data.get('bonus', '0'))
+                    total_amount = self._parse_number(row_data.get('total', '0'))
+
+                    logger.info(f"Row {idx}: Store={row_data.get('store')}, Principal={principal}, Bonus={bonus}, Total={total_amount}")
+
+                    record = {
+                        "store": row_data.get('store', store_name),
+                        "merchant_id": merchant_id,
+                        "legal_entity": row_data.get('legalEntity', '--'),
+                        "branch": row_data.get('branch', '--'),
+                        "market": row_data.get('market', '--'),
+                        "org_code": row_data.get('orgCode', ''),
+                        "tx_org_id": row_data.get('txOrgId', ''),
+                        "principal": principal,  # 本金
+                        "bonus": bonus,          # 赠金
+                        "total": total_amount,   # 合计
+                        "card_type": "山海会员",
+                        "extracted_at": datetime.now().isoformat()
+                    }
+
+                    # Save to database if available
+                    if self.db and not self.dry_run:
+                        self.db.save_membership_data(
+                            store_id=merchant_id,
+                            store_name=store_name,
+                            date=datetime.now().strftime('%Y-%m-%d'),
+                            cards_opened=0,  # Not available in this view
+                            total_amount=total_amount,
+                            card_details=[record]
+                        )
+
+                    all_records.append(record)
+
+                except Exception as e:
+                    logger.error(f"Error extracting row {idx}: {e}")
+                    continue
+
+            # Check if there are more pages to extract
+            total_records = table_data.get('pagination', {}).get('total', 0)
+            if total_records > len(all_records):
+                logger.info(f"Pagination detected: {len(all_records)}/{total_records} records extracted")
+
+            # ============================================================
+            # Click "查看订单明细" to get detailed order breakdown
+            # This shows individual membership card transactions per day
+            # ============================================================
+            detail_buttons = await frame.query_selector_all('button:has-text("查看订单明细")')
+            if detail_buttons:
+                logger.info(f"Found {len(detail_buttons)} 查看订单明细 buttons - extracting detailed order data")
+
+                for idx, detail_btn in enumerate(detail_buttons):
+                    try:
+                        # Click the detail button
+                        await detail_btn.click()
+                        logger.info(f"Clicked 查看订单明细 button {idx + 1}")
+                        await asyncio.sleep(2)
+
+                        # Extract order details from the dialog
+                        order_details = await self._extract_order_details_from_dialog(frame, page)
+                        logger.info(f"Extracted {len(order_details)} order details")
+
+                        # Add order details to records
+                        if all_records and idx < len(all_records):
+                            all_records[idx]['order_details'] = order_details
+                            all_records[idx]['order_count'] = len(order_details)
+                        else:
+                            # If no summary record exists, create one with just details
+                            all_records.append({
+                                "store": store_name,
+                                "merchant_id": merchant_id,
+                                "order_details": order_details,
+                                "order_count": len(order_details),
+                                "extracted_at": datetime.now().isoformat()
+                            })
+
+                        # Close the dialog
+                        close_btn = await frame.query_selector('button.saas-modal-close, button:has-text("Close"), [aria-label="Close"]')
+                        if close_btn:
+                            await close_btn.click()
+                            await asyncio.sleep(1)
+                        else:
+                            # Try pressing Escape to close
+                            await page.keyboard.press('Escape')
+                            await asyncio.sleep(1)
+
+                    except Exception as detail_error:
+                        logger.warning(f"Error extracting order details: {detail_error}")
+                        # Try to close any open dialog
+                        await page.keyboard.press('Escape')
+                        await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"Error extracting data: {e}", exc_info=True)
+
+        return all_records
+
+    async def _extract_order_details_from_dialog(
+        self,
+        frame,
+        page: Page
+    ) -> List[Dict]:
+        """
+        Extract order details from the 订单明细 dialog.
+
+        Dialog columns:
+        - 序号: Row number
+        - 订单编号: Order number (e.g., HY1999847996075229228)
+        - 订单时间: Order time (e.g., 2025/12/13 22:24:52)
+        - 订单状态: Order status (e.g., 充值成功)
+        - 订单来源: Order source (e.g., 收银端, 点餐助手)
+        - 本金: Principal amount
+        - 赠金: Bonus amount
+        - 押金: Deposit
+        - 手机号: Phone number (masked)
+        - 会员卡号: Member card number
+
+        Args:
+            frame: The iframe containing the dialog
+            page: Playwright page object
+
+        Returns:
+            List of order detail dictionaries
+        """
+        all_order_details = []
+
+        try:
+            # Wait for dialog to fully load
+            await asyncio.sleep(1)
+
+            # Extract data using JavaScript to handle the complex table structure
+            while True:
+                # Extract current page data
+                page_data = await frame.evaluate('''() => {
+                    const result = {
+                        orders: [],
+                        hasNextPage: false,
+                        totalRecords: 0,
+                        currentPage: 1
+                    };
+
+                    // Find the dialog
+                    const dialog = document.querySelector('.saas-modal, [role="dialog"]');
+                    if (!dialog) return result;
+
+                    // Find pagination info
+                    const paginationText = dialog.innerText.match(/共 (\\d+) 条记录/);
+                    if (paginationText) {
+                        result.totalRecords = parseInt(paginationText[1]);
+                    }
+
+                    // Check for next page button
+                    const nextBtn = dialog.querySelector('button[aria-label="right"]:not([disabled]), li:has-text("下一页") button:not([disabled])');
+                    result.hasNextPage = nextBtn !== null && !nextBtn.disabled;
+
+                    // Find all data rows in the dialog table
+                    // The dialog uses a similar table structure to the main page
+                    const rows = dialog.querySelectorAll('.saas-v5-table-tbody tr, table tbody tr');
+
+                    for (const row of rows) {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 6) {
+                            const order = {
+                                index: cells[0]?.innerText?.trim() || '',
+                                orderNumber: cells[1]?.innerText?.trim() || '',
+                                orderTime: cells[2]?.innerText?.trim() || '',
+                                orderStatus: cells[3]?.innerText?.trim() || '',
+                                orderSource: cells[4]?.innerText?.trim() || '',
+                                principal: cells[5]?.innerText?.trim() || '0',
+                                bonus: cells[6]?.innerText?.trim() || '0',
+                                deposit: cells[7]?.innerText?.trim() || '0',
+                                phone: cells[8]?.innerText?.trim() || '',
+                                cardNumber: cells[9]?.innerText?.trim() || ''
+                            };
+
+                            // Skip empty rows or header rows
+                            if (order.orderNumber && order.orderNumber.startsWith('HY')) {
+                                result.orders.push(order);
+                            }
+                        }
+                    }
+
+                    return result;
+                }''')
+
+                # Add extracted orders to the list
+                for order in page_data.get('orders', []):
+                    all_order_details.append({
+                        'order_number': order.get('orderNumber', ''),
+                        'order_time': order.get('orderTime', ''),
+                        'order_status': order.get('orderStatus', ''),
+                        'order_source': order.get('orderSource', ''),
+                        'principal': self._parse_number(order.get('principal', '0')),
+                        'bonus': self._parse_number(order.get('bonus', '0')),
+                        'deposit': self._parse_number(order.get('deposit', '0')),
+                        'phone': order.get('phone', ''),
+                        'card_number': order.get('cardNumber', ''),
+                        'card_type': '山海会员'
+                    })
+
+                logger.info(f"Extracted {len(page_data.get('orders', []))} orders from current page, total: {len(all_order_details)}")
+
+                # Check if there are more pages
+                if not page_data.get('hasNextPage', False):
+                    logger.info("No more pages in order details dialog")
+                    break
+
+                # Click next page button
+                next_clicked = await frame.evaluate('''() => {
+                    const dialog = document.querySelector('.saas-modal, [role="dialog"]');
+                    if (!dialog) return false;
+
+                    // Try different selectors for next page button
+                    const nextBtn = dialog.querySelector('li.saas-pagination-next button:not([disabled])') ||
+                                   dialog.querySelector('button[aria-label="right"]:not([disabled])') ||
+                                   dialog.querySelector('.saas-pagination-item:has-text("下一页") button:not([disabled])');
+
+                    if (nextBtn && !nextBtn.disabled) {
+                        nextBtn.click();
+                        return true;
+                    }
+                    return false;
+                }''')
+
+                if not next_clicked:
+                    logger.info("Could not click next page button")
+                    break
+
+                # Wait for next page to load
+                await asyncio.sleep(1.5)
+
+                # Safety check to prevent infinite loop
+                if len(all_order_details) >= page_data.get('totalRecords', 1000):
+                    break
+
+        except Exception as e:
+            logger.error(f"Error extracting order details from dialog: {e}", exc_info=True)
+
+        return all_order_details
+
+    async def _extract_daily_data(
+        self,
+        page: Page,
+        row_element,
+        date: str
+    ) -> List[Dict]:
+        """
+        Click on a date row and extract detailed order information.
+
+        Args:
+            page: Playwright page object
+            row_element: The row element to click
+            date: Date string for logging
+
+        Returns:
+            List of card detail dictionaries
+        """
+        details = []
+
+        try:
+            # Find and click the details link
+            detail_link = await row_element.query_selector('a:has-text("查看订单明细"), button:has-text("查看订单明细"), a:has-text("查看"), button:has-text("查看")')
+
+            if not detail_link:
+                logger.warning(f"No detail link found for date {date}")
+                return details
+
+            # Click to open details (might open modal or new page)
+            await detail_link.click()
+            logger.info(f"Clicked detail link for {date}")
+
+            # Wait for modal or details to load
+            await asyncio.sleep(2)
+
+            # Try to find detail table in modal
+            # This selector will need to be adjusted based on actual UI
+            detail_table = await page.query_selector('div[class*="modal"] table, div[class*="drawer"] table, div[class*="detail"] table')
+
+            if detail_table:
+                detail_rows = await detail_table.query_selector_all('tbody tr')
+                logger.info(f"Found {len(detail_rows)} detail rows for {date}")
+
+                for detail_row in detail_rows:
+                    try:
+                        cells = await detail_row.query_selector_all('td')
+                        if len(cells) >= 2:
+                            # Extract card details - adjust indices based on actual table structure
+                            card_id = await cells[0].inner_text()
+                            amount = await cells[1].inner_text()
+
+                            details.append({
+                                "card_id": card_id.strip(),
+                                "amount": self._parse_number(amount),
+                                "type": "山海会员"
+                            })
+                    except Exception as e:
+                        logger.error(f"Error extracting detail row: {e}")
+                        continue
+
+                # Close modal
+                close_button = await page.query_selector('button[class*="close"], button:has-text("关闭"), button:has-text("取消")')
+                if close_button:
+                    await close_button.click()
+                    await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error extracting daily data for {date}: {e}", exc_info=True)
+
+        return details
+
+    async def _set_dates_via_calendar(self, frame, page: Page, start_date: str, end_date: str) -> bool:
+        """
+        Set date range by clicking on calendar date cells directly.
+
+        This is a fallback method when fill() doesn't work properly.
+
+        Args:
+            frame: The iframe containing the calendar
+            page: Playwright page object
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Parse dates
+            from datetime import datetime
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+            start_day = start_dt.day
+            end_day = end_dt.day
+
+            # Click on start date input to open calendar
+            start_input = await frame.query_selector('input[placeholder="开始日期"]')
+            if start_input:
+                await start_input.click()
+                await asyncio.sleep(1)
+
+                # Find and click the start day in the calendar
+                # Calendar cells are in a grid, find the one with matching day number
+                day_clicked = await frame.evaluate(f'''() => {{
+                    // Find all date cells in the first (left) calendar panel
+                    const panels = document.querySelectorAll('.saas-picker-panel');
+                    if (panels.length === 0) return false;
+
+                    const leftPanel = panels[0];
+                    const cells = leftPanel.querySelectorAll('.saas-picker-cell-inner');
+
+                    for (const cell of cells) {{
+                        if (cell.textContent.trim() === '{start_day}') {{
+                            cell.click();
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }}''')
+
+                if day_clicked:
+                    logger.info(f"Clicked start date: day {start_day}")
+                    await asyncio.sleep(0.5)
+
+                    # Now click end date (calendar should auto-focus end date input)
+                    end_day_clicked = await frame.evaluate(f'''() => {{
+                        const panels = document.querySelectorAll('.saas-picker-panel');
+                        if (panels.length === 0) return false;
+
+                        // Try left panel first, then right panel
+                        for (const panel of panels) {{
+                            const cells = panel.querySelectorAll('.saas-picker-cell-inner');
+                            for (const cell of cells) {{
+                                if (cell.textContent.trim() === '{end_day}') {{
+                                    cell.click();
+                                    return true;
+                                }}
+                            }}
+                        }}
+                        return false;
+                    }}''')
+
+                    if end_day_clicked:
+                        logger.info(f"Clicked end date: day {end_day}")
+                        await asyncio.sleep(0.5)
+
+                        # Close calendar
+                        await page.keyboard.press('Escape')
+                        return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error setting dates via calendar: {e}")
+            return False
+
+    async def _dismiss_popups(self, page: Page) -> None:
+        """
+        Dismiss any tutorial or promotional popups.
+
+        Args:
+            page: Playwright page object
+        """
+        try:
+            # Common popup dismiss buttons
+            dismiss_texts = [
+                "我知道了",
+                "跳过",
+                "关闭",
+                "取消",
+                "知道了",
+                "×"
+            ]
+
+            for text in dismiss_texts:
+                try:
+                    button = await page.query_selector(f'button:has-text("{text}")', timeout=2000)
+                    if button:
+                        await button.click()
+                        logger.info(f"Dismissed popup with button: {text}")
+                        await asyncio.sleep(0.5)
+                except:
+                    pass
+
+            # Try to dismiss by clicking backdrop
+            try:
+                backdrop = await page.query_selector('[class*="mask"], [class*="backdrop"]', timeout=2000)
+                if backdrop:
+                    await backdrop.click()
+                    await asyncio.sleep(0.5)
+            except:
+                pass
+
+        except Exception as e:
+            # Silently fail - popups may not exist
+            pass
+
+    def _parse_number(self, value: str) -> float:
+        """
+        Parse number from string, handling Chinese number formatting.
+
+        Args:
+            value: String value to parse
+
+        Returns:
+            Float number
+        """
+        try:
+            # Remove common non-numeric characters
+            cleaned = value.replace(',', '').replace('¥', '').replace('元', '').strip()
+            return float(cleaned) if cleaned else 0.0
+        except:
+            return 0.0
+
+    def _log_summary(self, results: Dict) -> None:
+        """
+        Log crawl summary.
+
+        Args:
+            results: Results dictionary
+        """
+        logger.info("\n" + "=" * 80)
+        logger.info("CRAWL SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Total records extracted: {results['total_records']}")
+        logger.info(f"Successful stores: {len(results['success'])}")
+        logger.info(f"Failed stores: {len(results['failed'])}")
+        logger.info(f"Skipped stores: {len(results['skipped'])}")
+
+        if results['success']:
+            logger.info("\nSuccessful stores:")
+            for item in results['success']:
+                logger.info(f"  - {item['store']}: {item['records']} records")
+
+        if results['failed']:
+            logger.info("\nFailed stores:")
+            for item in results['failed']:
+                logger.info(f"  - {item['store']}: {item['error']}")
+
+        logger.info("=" * 80 + "\n")
+
+
+async def main():
+    """
+    Main function for standalone execution.
+    """
+    parser = argparse.ArgumentParser(
+        description='Meituan Membership Card Crawler',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Crawl all stores
+  python membership_card_crawler.py
+
+  # Crawl specific store
+  python membership_card_crawler.py --store 56756952
+
+  # Crawl with custom date range
+  python membership_card_crawler.py --start-date 2024-01-01 --end-date 2024-12-31
+
+  # Dry run (no database writes)
+  python membership_card_crawler.py --dry-run
+
+  # Run in headless mode
+  python membership_card_crawler.py --headless
+        """
+    )
+
+    parser.add_argument(
+        '--store',
+        type=str,
+        help='Merchant ID of specific store to crawl (crawls all if not specified)'
+    )
+
+    parser.add_argument(
+        '--start-date',
+        type=str,
+        default='2015-11-01',
+        help='Start date for data extraction (YYYY-MM-DD), default: 2015-11-01'
+    )
+
+    parser.add_argument(
+        '--end-date',
+        type=str,
+        default='2025-11-30',
+        help='End date for data extraction (YYYY-MM-DD), default: 2025-11-30'
+    )
+
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Run without saving to database'
+    )
+
+    parser.add_argument(
+        '--headless',
+        action='store_true',
+        help='Run browser in headless mode'
+    )
+
+    args = parser.parse_args()
+
+    # Import here to avoid circular dependencies
+    from src.session_manager import BrowserManager
+
+    # Initialize browser manager
+    browser_manager = BrowserManager('./user_data/meituan_session')
+
+    # Database manager will be implemented separately
+    # For now, pass None
+    db_manager = None
+
+    try:
+        # Start browser
+        await browser_manager.start(headless=args.headless)
+
+        # Get page and ensure logged in
+        page = await browser_manager.get_page()
+        logged_in = await browser_manager.ensure_logged_in(page)
+
+        if not logged_in:
+            logger.error("Failed to login. Please login manually.")
+            return
+
+        logger.info("Login successful, starting crawler...")
+
+        # Initialize crawler
+        crawler = MembershipCardCrawler(
+            browser_manager=browser_manager,
+            db_manager=db_manager,
+            dry_run=args.dry_run
+        )
+
+        # Run crawler
+        results = await crawler.run(
+            store_filter=args.store,
+            start_date=args.start_date,
+            end_date=args.end_date
+        )
+
+        # Print results
+        print("\n" + "=" * 80)
+        print("CRAWL COMPLETED")
+        print("=" * 80)
+        print(f"Total records: {results['total_records']}")
+        print(f"Success: {len(results['success'])} stores")
+        print(f"Failed: {len(results['failed'])} stores")
+        print("=" * 80)
+
+    except KeyboardInterrupt:
+        logger.info("Crawler interrupted by user")
+    except Exception as e:
+        logger.error(f"Crawler failed with error: {e}", exc_info=True)
+    finally:
+        # Cleanup
+        await browser_manager.stop()
+        logger.info("Browser closed, crawler shutdown complete")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

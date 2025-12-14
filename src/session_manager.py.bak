@@ -1,0 +1,399 @@
+"""
+Meituan Merchant Backend Session Manager
+Handles browser session persistence for maintaining login state across script executions.
+"""
+
+import asyncio
+import os
+import shutil
+import time
+from pathlib import Path
+from typing import Optional, Dict, Any
+from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
+
+
+class BrowserManager:
+    """
+    Manages persistent browser sessions for Meituan merchant backend automation.
+    Uses Playwright's launch_persistent_context to maintain login sessions across runs.
+    """
+
+    # Meituan URLs
+    LOGIN_URL = "https://eepassport.meituan.com/portal/login"
+    STORE_SELECTION_URL = "https://pos.meituan.com/web/rms-account#/selectorg"
+    OPERATIONS_CENTER_URL = "https://pos.meituan.com/web/operation/main#/"
+    MARKETING_CENTER_URL = "https://pos.meituan.com/web/marketing/home#/rms-discount/marketing"
+
+    def __init__(self, user_data_dir: str = "./user_data/meituan_session"):
+        """
+        Initialize the browser manager.
+
+        Args:
+            user_data_dir: Directory to store persistent browser data
+        """
+        self.user_data_dir = user_data_dir
+        self.playwright: Optional[Playwright] = None
+        self.context: Optional[BrowserContext] = None
+
+    async def start(self, headless: bool = False, cdp_url: str = None) -> BrowserContext:
+        """
+        Start the browser with persistent context or connect to existing Chrome via CDP.
+
+        Args:
+            headless: Whether to run browser in headless mode
+            cdp_url: CDP endpoint URL to connect to existing Chrome (e.g., 'http://localhost:9222')
+
+        Returns:
+            BrowserContext: The persistent browser context
+        """
+        self.playwright = await async_playwright().start()
+
+        # If CDP URL provided, connect to existing Chrome
+        if cdp_url:
+            print(f"Connecting to existing Chrome via CDP: {cdp_url}")
+            browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+            self.context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            return self.context
+
+        # Clean up any stale lock files before starting
+        self.cleanup_locks()
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            self.user_data_dir,
+            headless=headless,
+            channel='chrome',  # Use real Chrome instead of Chromium
+            viewport={'width': 1280, 'height': 800},
+            args=[
+                '--disable-blink-features=AutomationControlled',  # Hide automation flag
+                '--disable-dev-shm-usage',  # Prevent /dev/shm issues
+                '--no-sandbox',  # Required in some environments
+                '--disable-setuid-sandbox',
+                '--disable-web-security',  # Help bypass some checks
+            ],
+            ignore_default_args=['--enable-automation'],  # Remove automation flag
+        )
+
+        return self.context
+
+    async def get_page(self) -> Page:
+        """
+        Get the current page or create a new one.
+
+        Returns:
+            Page: The browser page
+        """
+        if not self.context:
+            raise RuntimeError("Browser context not started. Call start() first.")
+
+        if self.context.pages:
+            return self.context.pages[0]
+        return await self.context.new_page()
+
+    async def stop(self) -> None:
+        """
+        Properly close the browser and cleanup resources.
+        """
+        if self.context:
+            await self.context.close()
+            self.context = None
+
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
+
+    def cleanup_locks(self) -> None:
+        """
+        Remove stale lock files and crash reports from previous runs.
+        """
+        lock_file = Path(self.user_data_dir) / 'SingletonLock'
+        if lock_file.exists():
+            try:
+                lock_file.unlink()
+                print(f"Removed stale lock file: {lock_file}")
+            except Exception as e:
+                print(f"Warning: Could not remove lock file: {e}")
+
+        # Also clean up crash files
+        for item in ['Crashpad', 'crash_reports']:
+            path = Path(self.user_data_dir) / item
+            if path.exists():
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                    print(f"Cleaned up crash reports: {path}")
+                except Exception as e:
+                    print(f"Warning: Could not clean up {item}: {e}")
+
+    async def check_session_valid(self, page: Page) -> bool:
+        """
+        Check if the current session is still valid (user is logged in).
+
+        Args:
+            page: The page to check
+
+        Returns:
+            bool: True if session is valid, False otherwise
+        """
+        try:
+            # Method 1: Check for login-required elements
+            login_indicators = await page.evaluate('''() => {
+                return {
+                    hasLoginButton: !!document.querySelector('.login-btn, #login, [href*="login"], [class*="login-button"]'),
+                    hasUserMenu: !!document.querySelector('.user-menu, .avatar, .profile, [class*="user-info"], [class*="avatar"]'),
+                    hasQRCode: !!document.querySelector('.qrcode, [class*="qr"], [class*="QR"]'),
+                }
+            }''')
+
+            if login_indicators.get('hasQRCode') or login_indicators.get('hasLoginButton'):
+                return False
+
+            if login_indicators.get('hasUserMenu'):
+                return True
+
+            # Method 2: Check for auth cookies
+            cookies = await page.context.cookies()
+            auth_cookies = [
+                c for c in cookies
+                if 'token' in c['name'].lower() or 'session' in c['name'].lower()
+            ]
+
+            return len(auth_cookies) > 0
+
+        except Exception as e:
+            print(f"Error checking session validity: {e}")
+            return False
+
+    async def ensure_logged_in(
+        self,
+        page: Page,
+        login_url: Optional[str] = None,
+        timeout: int = 300000
+    ) -> bool:
+        """
+        Ensure the user is logged in, navigate to login page if needed.
+
+        Args:
+            page: The page to check
+            login_url: URL to navigate for login (defaults to LOGIN_URL)
+            timeout: Time to wait for manual login in milliseconds (default: 5 minutes)
+
+        Returns:
+            bool: True if logged in successfully, False otherwise
+        """
+        if login_url is None:
+            login_url = self.LOGIN_URL
+
+        try:
+            await page.goto(login_url, wait_until='networkidle', timeout=30000)
+            await asyncio.sleep(2)  # Wait for page to stabilize
+
+            if await self.check_session_valid(page):
+                print("Session is valid, already logged in.")
+                return True
+
+            print("Session expired or not found. Please log in manually...")
+            print(f"Waiting up to {timeout // 1000} seconds for login...")
+
+            # Wait for user to complete login
+            # Look for user menu or avatar elements that appear after login
+            await page.wait_for_selector(
+                '.user-menu, .avatar, .profile, [class*="user-info"], [class*="avatar"]',
+                timeout=timeout
+            )
+
+            print("Login detected! Session saved.")
+            return True
+
+        except Exception as e:
+            print(f"Error during login process: {e}")
+            return False
+
+    async def wait_for_login(self, page: Page, timeout: int = 300) -> bool:
+        """
+        Wait for the user to manually complete login.
+
+        Args:
+            page: The page to monitor
+            timeout: Timeout in seconds (default: 5 minutes)
+
+        Returns:
+            bool: True if login completed, False if timeout
+        """
+        print(f"Please complete login manually. Waiting up to {timeout} seconds...")
+
+        try:
+            await page.wait_for_selector(
+                '.user-menu, .avatar, .profile, [class*="user-info"], [class*="avatar"]',
+                timeout=timeout * 1000
+            )
+            print("Login completed successfully!")
+            return True
+        except Exception as e:
+            print(f"Login timeout or error: {e}")
+            return False
+
+    async def navigate_to_store_selection(self, page: Page) -> bool:
+        """
+        Navigate to the store selection page.
+
+        Args:
+            page: The page to navigate
+
+        Returns:
+            bool: True if navigation successful, False otherwise
+        """
+        try:
+            await page.goto(self.STORE_SELECTION_URL, wait_until='networkidle', timeout=30000)
+            print(f"Navigated to store selection: {self.STORE_SELECTION_URL}")
+            return True
+        except Exception as e:
+            print(f"Error navigating to store selection: {e}")
+            return False
+
+    async def select_store(self, page: Page, merchant_id: str) -> bool:
+        """
+        Select a specific store by merchant ID.
+
+        Args:
+            page: The page to interact with
+            merchant_id: The merchant/store ID to select
+
+        Returns:
+            bool: True if store selected successfully, False otherwise
+        """
+        try:
+            # First navigate to store selection page
+            if not await self.navigate_to_store_selection(page):
+                return False
+
+            await asyncio.sleep(2)  # Wait for page to load
+
+            # Try to find and click the store by merchant ID
+            # This selector may need to be adjusted based on actual page structure
+            store_selector = f'[data-merchant-id="{merchant_id}"], [data-id="{merchant_id}"]'
+
+            # Check if element exists
+            element = await page.query_selector(store_selector)
+            if element:
+                await element.click()
+                print(f"Selected store with merchant ID: {merchant_id}")
+                await asyncio.sleep(2)  # Wait for selection to process
+                return True
+            else:
+                print(f"Store with merchant ID {merchant_id} not found on page.")
+                # Alternative: try JavaScript-based selection
+                result = await page.evaluate(f'''() => {{
+                    const elements = Array.from(document.querySelectorAll('[class*="store"], [class*="merchant"]'));
+                    const target = elements.find(el => el.textContent.includes("{merchant_id}"));
+                    if (target) {{
+                        target.click();
+                        return true;
+                    }}
+                    return false;
+                }}''')
+
+                if result:
+                    print(f"Selected store with merchant ID: {merchant_id} (via text search)")
+                    await asyncio.sleep(2)
+                    return True
+                else:
+                    print(f"Could not select store with merchant ID: {merchant_id}")
+                    return False
+
+        except Exception as e:
+            print(f"Error selecting store: {e}")
+            return False
+
+    async def force_persist_cookies(self) -> None:
+        """
+        Convert session cookies to persistent cookies with expiry dates.
+        This ensures cookies persist across browser restarts.
+        """
+        if not self.context:
+            raise RuntimeError("Browser context not started. Call start() first.")
+
+        try:
+            cookies = await self.context.cookies()
+
+            # Set expiry to 1 year from now
+            future_expiry = time.time() + (365 * 24 * 60 * 60)
+
+            modified_cookies = []
+            for cookie in cookies:
+                if 'expires' not in cookie or cookie.get('expires', -1) == -1:
+                    cookie['expires'] = future_expiry
+                modified_cookies.append(cookie)
+
+            await self.context.clear_cookies()
+            await self.context.add_cookies(modified_cookies)
+            print(f"Forced persistence for {len(modified_cookies)} cookies")
+
+        except Exception as e:
+            print(f"Error forcing cookie persistence: {e}")
+
+    async def get_cookies(self) -> list[Dict[str, Any]]:
+        """
+        Get all cookies from the current context.
+
+        Returns:
+            list: List of cookie dictionaries
+        """
+        if not self.context:
+            raise RuntimeError("Browser context not started. Call start() first.")
+
+        return await self.context.cookies()
+
+    async def export_storage_state(self, path: str) -> None:
+        """
+        Export the current storage state (cookies, localStorage) to a file.
+
+        Args:
+            path: Path to save the storage state
+        """
+        if not self.context:
+            raise RuntimeError("Browser context not started. Call start() first.")
+
+        await self.context.storage_state(path=path)
+        print(f"Storage state exported to: {path}")
+
+
+# Example usage
+async def example_usage():
+    """
+    Example of how to use the BrowserManager class.
+    """
+    manager = BrowserManager('./user_data/meituan_session')
+
+    try:
+        # Start browser
+        await manager.start(headless=False)
+
+        # Get page
+        page = await manager.get_page()
+
+        # Ensure logged in
+        logged_in = await manager.ensure_logged_in(page)
+
+        if logged_in:
+            # Navigate to operations center
+            await page.goto(BrowserManager.OPERATIONS_CENTER_URL, wait_until='networkidle')
+            print("Successfully navigated to operations center")
+
+            # Optionally select a specific store
+            # await manager.select_store(page, "YOUR_MERCHANT_ID")
+
+            # Optionally force cookie persistence
+            await manager.force_persist_cookies()
+
+            # Do your automation work here
+            await asyncio.sleep(5)
+        else:
+            print("Failed to login")
+
+    finally:
+        # Always clean up
+        await manager.stop()
+
+
+if __name__ == "__main__":
+    # Run the example
+    asyncio.run(example_usage())

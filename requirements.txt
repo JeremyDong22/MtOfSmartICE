@@ -1,0 +1,10 @@
+# Meituan Merchant Backend Crawler - Python Dependencies
+
+# Web automation and browser control
+playwright>=1.40.0
+
+# Async support (included in Python 3.7+, but listed for clarity)
+# asyncio is part of the standard library
+
+# Type hints support (included in Python 3.5+)
+# typing is part of the standard library
