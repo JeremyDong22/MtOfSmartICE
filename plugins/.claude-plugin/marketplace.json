@@ -1,0 +1,13 @@
+{
+  "name": "smartice-plugins",
+  "owner": {
+    "name": "SmartICE"
+  },
+  "plugins": [
+    {
+      "name": "crawler-workflow",
+      "source": "./crawler-workflow",
+      "description": "Interactive crawler development: explore with DevTools, document paths, build and test"
+    }
+  ]
+}
