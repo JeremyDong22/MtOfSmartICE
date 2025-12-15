@@ -41,6 +41,9 @@ python src/main.py --skip-navigation
 
 # Custom CDP endpoint
 python src/main.py --cdp http://localhost:9223
+
+# Skip Supabase upload (SQLite only)
+python src/main.py --no-supabase
 ```
 
 ### Database Queries
@@ -75,11 +78,15 @@ main.py
     ├─ Navigate to 营销中心 → 数据报表 → 权益包售卖汇总表
     ├─ Configure filters (门店/日期 checkboxes, date range)
     ├─ Extract all pages of data
-    └─ Save to database
+    └─ Save to databases
   ↓
-  DatabaseManager (database/db_manager.py)
-    ├─ Save equity package sales (UPSERT with conditional update)
-    └─ Export reports
+  DatabaseManager (database/db_manager.py)        ← Local SQLite
+    └─ Save to SQLite (UPSERT with conditional update)
+  ↓
+  SupabaseManager (database/supabase_manager.py)  ← Cloud Supabase
+    ├─ Map org_code → restaurant_id via master_restaurant
+    ├─ Upload to Supabase (error isolation per record)
+    └─ Unknown stores logged but don't block others
 ```
 
 ### Key Design Patterns
@@ -88,6 +95,8 @@ main.py
 - **Group account (集团账号)**: Single crawl extracts data for all stores, no per-store switching needed
 - **Abstract base class**: Crawlers inherit from `BaseCrawler` which provides popup dismissal, iframe handling, result formatting
 - **Conditional duplicate handling**: Only updates existing records if new values are higher
+- **Dual database storage**: SQLite (local backup) + Supabase (cloud sync)
+- **Error isolation**: Supabase upload failures for one store don't block other stores
 
 ### Adding New Crawlers
 
@@ -109,12 +118,20 @@ class NewCrawler(BaseCrawler):
 All settings in `src/config.py`:
 - `CDP_URL`: Chrome DevTools Protocol endpoint (default: `http://localhost:9222`)
 - `DB_PATH`: Database path
+- `SUPABASE_URL`: Supabase project URL
+- `SUPABASE_KEY`: Supabase anon key (embedded, no env var needed)
 - `MEITUAN_*_URL`: Target URLs
 - `DEFAULT_TIMEOUT`: Timeout configuration
 
 ## Database Schema
 
-- **equity_package_sales**: org_code + date + package_name (UNIQUE), store_name, unit_price, quantity_sold, total_sales, refund_quantity, refund_amount
+### Local SQLite (`database/meituan_data.db`)
+- **mt_stores**: org_code (PK), store_name
+- **mt_equity_package_sales**: org_code + date + package_name (UNIQUE), unit_price, quantity_sold, total_sales, refund_quantity, refund_amount
+
+### Cloud Supabase
+- **master_restaurant**: id (UUID), restaurant_name, meituan_org_code (maps to org_code)
+- **mt_equity_package_sales**: restaurant_id (FK) + date + package_name (UNIQUE), same fields as SQLite
 
 ## Important Notes
 
@@ -123,3 +140,5 @@ All settings in `src/config.py`:
 - Uses 集团账号 to get aggregated data for all stores in one crawl
 - Report iframe is `crm-smart` - crawler handles automatic iframe detection
 - Conditional update: only overwrites existing records if new values are higher
+- Supabase sync is automatic (use `--no-supabase` to skip)
+- New stores need `meituan_org_code` mapping in `master_restaurant` table for Supabase upload
