@@ -21,6 +21,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# NOTE: StoreNavigator imported but not used - reserved for future multi-store individual crawling
 from src.browser import CDPSession, StoreNavigator, ensure_cdp_available, get_cdp_url
 from src.crawlers.权益包售卖汇总表 import EquityPackageSalesCrawler
 from src.utils import get_yesterday, get_today
