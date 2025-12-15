@@ -54,3 +54,8 @@ Thumbs.db
 # Playwright
 playwright-report/
 test-results/
+
+# Environment secrets
+.env
+.env.*
+.mcp.json
