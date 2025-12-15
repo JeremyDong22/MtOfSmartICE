@@ -1,15 +1,24 @@
 """
-Database Manager for Meituan Merchant Backend Crawler
-Handles all database operations including store management, data storage, and reporting.
+Database Manager for Meituan Crawler - Simplified version for equity package sales
+v2.1 - Added conditional duplicate handling: only updates if new values are higher
+       Added updated_at column to track when records change
+       Compatible with both SQLite and PostgreSQL (Supabase)
+
+Tables:
+- mt_stores: Store information with org_code as primary key
+- mt_equity_package_sales: Equity package sales data linked to stores
+
+Duplicate Handling Logic:
+- If record exists for (org_code, date, package_name), compare values
+- Only update if new quantity_sold > existing OR new total_sales > existing
+- This handles mid-day vs end-of-day data collection scenarios
 """
 
 import sqlite3
-import csv
-import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
-from datetime import datetime, date
+from typing import List, Dict, Optional, Any
+from datetime import datetime
 from contextlib import contextmanager
 from threading import Lock
 
@@ -23,46 +32,9 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Manages SQLite database operations for Meituan crawler data.
-    Provides thread-safe operations for storing and querying merchant data.
+    Manages SQLite database operations for Meituan equity package sales data.
+    Provides thread-safe operations for storing and querying data.
     """
-
-    # Database schema version for migrations
-    SCHEMA_VERSION = 1
-
-    # Default stores to populate
-    DEFAULT_STORES = [
-        {
-            "merchant_id": "56756952",
-            "store_name": "宁桂杏山野烤肉（绵阳1958店）",
-            "org_code": "MD00006"
-        },
-        {
-            "merchant_id": "56728236",
-            "store_name": "宁桂杏山野烤肉（常熟世贸店）",
-            "org_code": "MD00007"
-        },
-        {
-            "merchant_id": "56799302",
-            "store_name": "野百灵·贵州酸汤火锅（1958店）",
-            "org_code": "MD00008"
-        },
-        {
-            "merchant_id": "58188193",
-            "store_name": "宁桂杏山野烤肉（上马店）",
-            "org_code": "MD00009"
-        },
-        {
-            "merchant_id": "58121229",
-            "store_name": "野百灵·贵州酸汤火锅（德阳店）",
-            "org_code": "MD00010"
-        },
-        {
-            "merchant_id": "58325928",
-            "store_name": "宁桂杏山野烤肉（江油首店）",
-            "org_code": "MD00011"
-        }
-    ]
 
     def __init__(self, db_path: str = "database/meituan_data.db"):
         """
@@ -87,105 +59,58 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Create stores table
+                # Create stores table - org_code is primary key
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS stores (
-                        merchant_id TEXT PRIMARY KEY,
+                    CREATE TABLE IF NOT EXISTS mt_stores (
+                        org_code TEXT PRIMARY KEY,
                         store_name TEXT NOT NULL,
-                        org_code TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
 
-                # Create membership card data table
+                # Create equity package sales table with updated_at for tracking changes
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS membership_card_data (
+                    CREATE TABLE IF NOT EXISTS mt_equity_package_sales (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        merchant_id TEXT NOT NULL,
+                        org_code TEXT NOT NULL,
                         date TEXT NOT NULL,
-                        cards_opened INTEGER DEFAULT 0,
-                        total_amount REAL DEFAULT 0.0,
+                        package_name TEXT NOT NULL,
+                        unit_price REAL NOT NULL,
+                        quantity_sold INTEGER NOT NULL,
+                        total_sales REAL NOT NULL,
+                        refund_quantity INTEGER DEFAULT 0,
+                        refund_amount REAL DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (merchant_id) REFERENCES stores(merchant_id),
-                        UNIQUE(merchant_id, date)
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (org_code) REFERENCES mt_stores(org_code),
+                        UNIQUE(org_code, date, package_name)
                     )
                 """)
 
-                # Create card details table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS card_details (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        membership_data_id INTEGER NOT NULL,
-                        card_id TEXT,
-                        amount REAL NOT NULL,
-                        card_type TEXT,
-                        transaction_time TIMESTAMP,
-                        FOREIGN KEY (membership_data_id) REFERENCES membership_card_data(id)
-                    )
-                """)
-
-                # Create crawl log table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS crawl_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        merchant_id TEXT NOT NULL,
-                        crawler_type TEXT NOT NULL,
-                        date TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        records_count INTEGER DEFAULT 0,
-                        error_message TEXT,
-                        crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (merchant_id) REFERENCES stores(merchant_id),
-                        UNIQUE(merchant_id, crawler_type, date)
-                    )
-                """)
-
-                # Create metadata table for migrations
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS metadata (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-
-                # Set schema version
-                cursor.execute("""
-                    INSERT OR REPLACE INTO metadata (key, value)
-                    VALUES ('schema_version', ?)
-                """, (str(self.SCHEMA_VERSION),))
+                # Add updated_at column if table exists but column doesn't (migration)
+                try:
+                    cursor.execute("""
+                        ALTER TABLE mt_equity_package_sales
+                        ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    """)
+                    logger.info("Added updated_at column to mt_equity_package_sales")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
 
                 # Create indexes for better query performance
                 cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_membership_merchant_date
-                    ON membership_card_data(merchant_id, date)
+                    CREATE INDEX IF NOT EXISTS idx_equity_sales_org_date
+                    ON mt_equity_package_sales(org_code, date)
                 """)
 
                 cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_crawl_log_merchant_type_date
-                    ON crawl_log(merchant_id, crawler_type, date)
+                    CREATE INDEX IF NOT EXISTS idx_equity_sales_date
+                    ON mt_equity_package_sales(date)
                 """)
-
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_card_details_membership_id
-                    ON card_details(membership_data_id)
-                """)
-
-                # Populate default stores (done in same transaction)
-                for store in self.DEFAULT_STORES:
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO stores (merchant_id, store_name, org_code)
-                        VALUES (?, ?, ?)
-                    """, (
-                        store["merchant_id"],
-                        store["store_name"],
-                        store["org_code"]
-                    ))
 
                 conn.commit()
                 logger.info("Database tables created successfully")
-                logger.info(f"Populated {len(self.DEFAULT_STORES)} default stores")
 
         except sqlite3.Error as e:
             logger.error(f"Database initialization error: {e}")
@@ -223,35 +148,40 @@ class DatabaseManager:
 
     # ==================== Store Operations ====================
 
-    def populate_default_stores(self):
+    def save_store(self, org_code: str, store_name: str) -> bool:
         """
-        Populate stores table with default stores.
-        Safe to call multiple times (uses INSERT OR IGNORE).
+        Save or update a store. Uses UPSERT pattern.
+
+        Args:
+            org_code: Organization code (e.g., "MD00007")
+            store_name: Store name
+
+        Returns:
+            True if successful, False otherwise
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
-
-                for store in self.DEFAULT_STORES:
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO stores (merchant_id, store_name, org_code)
-                        VALUES (?, ?, ?)
-                    """, (
-                        store["merchant_id"],
-                        store["store_name"],
-                        store["org_code"]
-                    ))
+                cursor.execute("""
+                    INSERT INTO mt_stores (org_code, store_name)
+                    VALUES (?, ?)
+                    ON CONFLICT(org_code)
+                    DO UPDATE SET
+                        store_name = excluded.store_name,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (org_code, store_name))
 
                 conn.commit()
-                logger.info(f"Populated {len(self.DEFAULT_STORES)} default stores")
+                logger.info(f"Saved store: {store_name} ({org_code})")
+                return True
 
         except sqlite3.Error as e:
-            logger.error(f"Error populating stores: {e}")
-            raise
+            logger.error(f"Error saving store {org_code}: {e}")
+            return False
 
-    def get_all_stores(self) -> List[Dict[str, Any]]:
+    def get_stores(self) -> List[Dict[str, Any]]:
         """
-        Retrieve all stores from the database.
+        Get all stores from the database.
 
         Returns:
             List of store dictionaries
@@ -260,8 +190,8 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT merchant_id, store_name, org_code, created_at, updated_at
-                    FROM stores
+                    SELECT org_code, store_name, created_at, updated_at
+                    FROM mt_stores
                     ORDER BY org_code
                 """)
 
@@ -273,190 +203,155 @@ class DatabaseManager:
             logger.error(f"Error retrieving stores: {e}")
             return []
 
-    def get_store(self, merchant_id: str) -> Optional[Dict[str, Any]]:
+    # ==================== Equity Package Sales Operations ====================
+
+    def save_equity_package_sales(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
         """
-        Get store information by merchant ID.
+        Save equity package sales records with conditional duplicate handling.
+        Only updates existing records if new values are higher (quantity_sold or total_sales).
+        Automatically creates stores if they don't exist.
+
+        Duplicate Logic:
+        - If record doesn't exist: INSERT new record
+        - If record exists AND (new quantity > old OR new sales > old): UPDATE record
+        - If record exists AND new values are NOT higher: SKIP (keep existing)
+
+        This handles the scenario where mid-day crawls have lower values than end-of-day.
 
         Args:
-            merchant_id: The merchant/store ID
+            records: List of record dictionaries with keys:
+                - org_code: Organization code
+                - store_name: Store name
+                - date: Date in YYYY-MM-DD format
+                - package_name: Package name
+                - unit_price: Unit price
+                - quantity_sold: Quantity sold
+                - total_sales: Total sales amount
+                - refund_quantity: Refund quantity (optional)
+                - refund_amount: Refund amount (optional)
 
         Returns:
-            Store dictionary or None if not found
+            Dictionary with counts: {"inserted": N, "updated": N, "skipped": N}
         """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT merchant_id, store_name, org_code, created_at, updated_at
-                    FROM stores
-                    WHERE merchant_id = ?
-                """, (merchant_id,))
+        stats = {"inserted": 0, "updated": 0, "skipped": 0}
 
-                row = cursor.fetchone()
-                if row:
-                    return dict(row)
-                else:
-                    logger.warning(f"Store not found: {merchant_id}")
-                    return None
-
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving store {merchant_id}: {e}")
-            return None
-
-    def add_store(
-        self,
-        merchant_id: str,
-        store_name: str,
-        org_code: Optional[str] = None
-    ) -> bool:
-        """
-        Add a new store to the database.
-
-        Args:
-            merchant_id: The merchant/store ID
-            store_name: Name of the store
-            org_code: Optional organization code
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT OR REPLACE INTO stores (merchant_id, store_name, org_code, updated_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                """, (merchant_id, store_name, org_code))
-
-                conn.commit()
-                logger.info(f"Added/updated store: {store_name} ({merchant_id})")
-                return True
-
-        except sqlite3.Error as e:
-            logger.error(f"Error adding store {merchant_id}: {e}")
-            return False
-
-    # ==================== Membership Card Data Operations ====================
-
-    def save_membership_data(
-        self,
-        store_id: str,
-        store_name: str,
-        date: str,
-        cards_opened: int,
-        total_amount: float,
-        card_details: Optional[List[Dict[str, Any]]] = None
-    ) -> int:
-        """
-        Save membership card data for a store on a specific date.
-        Uses UPSERT to update existing records.
-
-        Args:
-            store_id: The merchant/store ID
-            store_name: Name of the store
-            date: Date in YYYY-MM-DD format
-            cards_opened: Number of cards opened
-            total_amount: Total amount of card sales
-            card_details: Optional list of individual card transaction details
-
-        Returns:
-            The ID of the inserted/updated record, or -1 on error
-        """
-        # Validate date format
-        if not self._validate_date(date):
-            logger.error(f"Invalid date format: {date}. Expected YYYY-MM-DD")
-            return -1
-
-        # Validate amounts
-        if cards_opened < 0 or total_amount < 0:
-            logger.error("Cards opened and total amount must be non-negative")
-            return -1
+        if not records:
+            logger.warning("No records to save")
+            return stats
 
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Ensure store exists (inline to avoid nested connection)
-                cursor.execute("""
-                    INSERT OR REPLACE INTO stores (merchant_id, store_name, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                """, (store_id, store_name))
+                for record in records:
+                    org_code = record['org_code']
+                    store_name = record['store_name']
+                    date = record['date']
+                    package_name = record['package_name']
+                    new_quantity = record['quantity_sold']
+                    new_sales = record['total_sales']
 
-                # Insert or update membership data
-                cursor.execute("""
-                    INSERT INTO membership_card_data
-                    (merchant_id, date, cards_opened, total_amount)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(merchant_id, date)
-                    DO UPDATE SET
-                        cards_opened = excluded.cards_opened,
-                        total_amount = excluded.total_amount,
-                        created_at = CURRENT_TIMESTAMP
-                """, (store_id, date, cards_opened, total_amount))
-
-                # Get the ID of the inserted/updated record
-                membership_data_id = cursor.lastrowid
-                if membership_data_id == 0:
-                    # Record was updated, get its ID
+                    # Ensure store exists first
                     cursor.execute("""
-                        SELECT id FROM membership_card_data
-                        WHERE merchant_id = ? AND date = ?
-                    """, (store_id, date))
-                    row = cursor.fetchone()
-                    if row:
-                        membership_data_id = row[0]
+                        INSERT INTO mt_stores (org_code, store_name)
+                        VALUES (?, ?)
+                        ON CONFLICT(org_code)
+                        DO UPDATE SET
+                            store_name = excluded.store_name,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (org_code, store_name))
 
-                # Save card details if provided
-                if card_details and membership_data_id > 0:
-                    # Delete existing card details for this record
+                    # Check if record exists and get current values
                     cursor.execute("""
-                        DELETE FROM card_details
-                        WHERE membership_data_id = ?
-                    """, (membership_data_id,))
+                        SELECT id, quantity_sold, total_sales
+                        FROM mt_equity_package_sales
+                        WHERE org_code = ? AND date = ? AND package_name = ?
+                    """, (org_code, date, package_name))
 
-                    # Insert new card details
-                    for detail in card_details:
+                    existing = cursor.fetchone()
+
+                    if existing is None:
+                        # No existing record - INSERT new
                         cursor.execute("""
-                            INSERT INTO card_details
-                            (membership_data_id, card_id, amount, card_type, transaction_time)
-                            VALUES (?, ?, ?, ?, ?)
+                            INSERT INTO mt_equity_package_sales
+                            (org_code, date, package_name, unit_price, quantity_sold,
+                             total_sales, refund_quantity, refund_amount, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         """, (
-                            membership_data_id,
-                            detail.get('card_id'),
-                            detail.get('amount', 0.0),
-                            detail.get('card_type'),
-                            detail.get('transaction_time')
+                            org_code, date, package_name,
+                            record['unit_price'], new_quantity, new_sales,
+                            record.get('refund_quantity', 0),
+                            record.get('refund_amount', 0.0)
                         ))
+                        stats["inserted"] += 1
+                        logger.debug(f"INSERT: {org_code}/{date}/{package_name} - qty={new_quantity}, sales={new_sales}")
 
-                    logger.info(f"Saved {len(card_details)} card details")
+                    else:
+                        # Record exists - check if new values are higher
+                        old_quantity = existing['quantity_sold']
+                        old_sales = existing['total_sales']
+
+                        if new_quantity > old_quantity or new_sales > old_sales:
+                            # New values are higher - UPDATE
+                            cursor.execute("""
+                                UPDATE mt_equity_package_sales
+                                SET unit_price = ?,
+                                    quantity_sold = ?,
+                                    total_sales = ?,
+                                    refund_quantity = ?,
+                                    refund_amount = ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (
+                                record['unit_price'], new_quantity, new_sales,
+                                record.get('refund_quantity', 0),
+                                record.get('refund_amount', 0.0),
+                                existing['id']
+                            ))
+                            stats["updated"] += 1
+                            logger.debug(
+                                f"UPDATE: {org_code}/{date}/{package_name} - "
+                                f"qty: {old_quantity}->{new_quantity}, sales: {old_sales}->{new_sales}"
+                            )
+
+                        else:
+                            # New values are NOT higher - SKIP
+                            stats["skipped"] += 1
+                            logger.debug(
+                                f"SKIP: {org_code}/{date}/{package_name} - "
+                                f"existing qty={old_quantity} >= new qty={new_quantity}, "
+                                f"existing sales={old_sales} >= new sales={new_sales}"
+                            )
 
                 conn.commit()
+
+                total = stats["inserted"] + stats["updated"] + stats["skipped"]
                 logger.info(
-                    f"Saved membership data for {store_name} on {date}: "
-                    f"{cards_opened} cards, {total_amount:.2f} yuan"
+                    f"Processed {total} records: "
+                    f"{stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped"
                 )
-                return membership_data_id
+                return stats
 
         except sqlite3.Error as e:
-            logger.error(f"Error saving membership data: {e}")
-            return -1
+            logger.error(f"Error saving equity package sales: {e}")
+            return stats
 
-    def get_membership_data(
+    def get_equity_sales(
         self,
-        store_id: Optional[str] = None,
+        org_code: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Query membership data with optional filters.
+        Query equity package sales with optional filters.
 
         Args:
-            store_id: Filter by merchant/store ID
+            org_code: Filter by organization code
             start_date: Filter by start date (inclusive)
             end_date: Filter by end date (inclusive)
 
         Returns:
-            List of membership data records
+            List of sales records
         """
         try:
             with self.get_connection() as conn:
@@ -465,115 +360,81 @@ class DatabaseManager:
                 # Build query with filters
                 query = """
                     SELECT
-                        m.id,
-                        m.merchant_id,
-                        s.store_name,
+                        s.id,
                         s.org_code,
-                        m.date,
-                        m.cards_opened,
-                        m.total_amount,
-                        m.created_at
-                    FROM membership_card_data m
-                    JOIN stores s ON m.merchant_id = s.merchant_id
+                        st.store_name,
+                        s.date,
+                        s.package_name,
+                        s.unit_price,
+                        s.quantity_sold,
+                        s.total_sales,
+                        s.refund_quantity,
+                        s.refund_amount,
+                        s.created_at
+                    FROM mt_equity_package_sales s
+                    JOIN mt_stores st ON s.org_code = st.org_code
                     WHERE 1=1
                 """
                 params = []
 
-                if store_id:
-                    query += " AND m.merchant_id = ?"
-                    params.append(store_id)
+                if org_code:
+                    query += " AND s.org_code = ?"
+                    params.append(org_code)
 
                 if start_date:
-                    query += " AND m.date >= ?"
+                    query += " AND s.date >= ?"
                     params.append(start_date)
 
                 if end_date:
-                    query += " AND m.date <= ?"
+                    query += " AND s.date <= ?"
                     params.append(end_date)
 
-                query += " ORDER BY m.date DESC, s.store_name"
+                query += " ORDER BY s.date DESC, st.store_name, s.package_name"
 
                 cursor.execute(query, params)
                 results = [dict(row) for row in cursor.fetchall()]
 
-                logger.info(f"Retrieved {len(results)} membership data records")
+                logger.info(f"Retrieved {len(results)} equity sales records")
                 return results
 
         except sqlite3.Error as e:
-            logger.error(f"Error retrieving membership data: {e}")
+            logger.error(f"Error retrieving equity sales: {e}")
             return []
-
-    def get_card_details(self, membership_data_id: int) -> List[Dict[str, Any]]:
-        """
-        Get card details for a specific membership data record.
-
-        Args:
-            membership_data_id: The ID of the membership data record
-
-        Returns:
-            List of card detail records
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT
-                        id,
-                        membership_data_id,
-                        card_id,
-                        amount,
-                        card_type,
-                        transaction_time
-                    FROM card_details
-                    WHERE membership_data_id = ?
-                    ORDER BY transaction_time DESC
-                """, (membership_data_id,))
-
-                results = [dict(row) for row in cursor.fetchall()]
-                logger.info(f"Retrieved {len(results)} card details")
-                return results
-
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving card details: {e}")
-            return []
-
-    # ==================== Crawl Tracking Operations ====================
 
     def data_exists(
         self,
-        store_id: str,
+        org_code: str,
         date: str,
-        crawler_type: str
+        package_name: str
     ) -> bool:
         """
-        Check if data has already been crawled for a store/date/type.
+        Check if a specific record already exists.
 
         Args:
-            store_id: The merchant/store ID
+            org_code: Organization code
             date: Date in YYYY-MM-DD format
-            crawler_type: Type of crawler (e.g., "membership_card")
+            package_name: Package name
 
         Returns:
-            True if data exists and was successful, False otherwise
+            True if record exists, False otherwise
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT COUNT(*) as count
-                    FROM crawl_log
-                    WHERE merchant_id = ?
+                    FROM mt_equity_package_sales
+                    WHERE org_code = ?
                         AND date = ?
-                        AND crawler_type = ?
-                        AND status = 'success'
-                """, (store_id, date, crawler_type))
+                        AND package_name = ?
+                """, (org_code, date, package_name))
 
                 row = cursor.fetchone()
                 exists = row['count'] > 0
 
                 if exists:
-                    logger.info(
-                        f"Data already exists for {store_id} on {date} ({crawler_type})"
+                    logger.debug(
+                        f"Data exists for {org_code} / {package_name} on {date}"
                     )
 
                 return exists
@@ -581,454 +442,6 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Error checking data existence: {e}")
             return False
-
-    def log_crawl(
-        self,
-        store_id: str,
-        crawler_type: str,
-        date: str,
-        status: str,
-        records_count: int = 0,
-        error_message: Optional[str] = None
-    ):
-        """
-        Log a crawl operation.
-
-        Args:
-            store_id: The merchant/store ID
-            crawler_type: Type of crawler
-            date: Date in YYYY-MM-DD format
-            status: Status ('success', 'failed', 'partial')
-            records_count: Number of records crawled
-            error_message: Optional error message if failed
-        """
-        # Validate status
-        valid_statuses = ['success', 'failed', 'partial']
-        if status not in valid_statuses:
-            logger.warning(
-                f"Invalid status '{status}'. Using 'failed'. "
-                f"Valid: {valid_statuses}"
-            )
-            status = 'failed'
-
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO crawl_log
-                    (merchant_id, crawler_type, date, status, records_count, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(merchant_id, crawler_type, date)
-                    DO UPDATE SET
-                        status = excluded.status,
-                        records_count = excluded.records_count,
-                        error_message = excluded.error_message,
-                        crawled_at = CURRENT_TIMESTAMP
-                """, (
-                    store_id,
-                    crawler_type,
-                    date,
-                    status,
-                    records_count,
-                    error_message
-                ))
-
-                conn.commit()
-                logger.info(
-                    f"Logged crawl for {store_id} on {date} ({crawler_type}): "
-                    f"{status} - {records_count} records"
-                )
-
-        except sqlite3.Error as e:
-            logger.error(f"Error logging crawl: {e}")
-
-    def get_crawl_status(
-        self,
-        store_id: Optional[str] = None,
-        crawler_type: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get crawl status/history with optional filters.
-
-        Args:
-            store_id: Filter by merchant/store ID
-            crawler_type: Filter by crawler type
-
-        Returns:
-            List of crawl log records
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-
-                query = """
-                    SELECT
-                        c.id,
-                        c.merchant_id,
-                        s.store_name,
-                        c.crawler_type,
-                        c.date,
-                        c.status,
-                        c.records_count,
-                        c.error_message,
-                        c.crawled_at
-                    FROM crawl_log c
-                    JOIN stores s ON c.merchant_id = s.merchant_id
-                    WHERE 1=1
-                """
-                params = []
-
-                if store_id:
-                    query += " AND c.merchant_id = ?"
-                    params.append(store_id)
-
-                if crawler_type:
-                    query += " AND c.crawler_type = ?"
-                    params.append(crawler_type)
-
-                query += " ORDER BY c.crawled_at DESC"
-
-                cursor.execute(query, params)
-                results = [dict(row) for row in cursor.fetchall()]
-
-                logger.info(f"Retrieved {len(results)} crawl log records")
-                return results
-
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving crawl status: {e}")
-            return []
-
-    # ==================== Reporting and Analytics ====================
-
-    def get_daily_summary(
-        self,
-        store_id: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get daily summary of membership card data.
-
-        Args:
-            store_id: Filter by merchant/store ID
-            start_date: Filter by start date (inclusive)
-            end_date: Filter by end date (inclusive)
-
-        Returns:
-            List of daily summary records
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-
-                query = """
-                    SELECT
-                        m.date,
-                        COUNT(DISTINCT m.merchant_id) as store_count,
-                        SUM(m.cards_opened) as total_cards,
-                        SUM(m.total_amount) as total_amount,
-                        AVG(m.total_amount) as avg_amount_per_store
-                    FROM membership_card_data m
-                    WHERE 1=1
-                """
-                params = []
-
-                if store_id:
-                    query += " AND m.merchant_id = ?"
-                    params.append(store_id)
-
-                if start_date:
-                    query += " AND m.date >= ?"
-                    params.append(start_date)
-
-                if end_date:
-                    query += " AND m.date <= ?"
-                    params.append(end_date)
-
-                query += " GROUP BY m.date ORDER BY m.date DESC"
-
-                cursor.execute(query, params)
-                results = [dict(row) for row in cursor.fetchall()]
-
-                logger.info(f"Retrieved {len(results)} daily summary records")
-                return results
-
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving daily summary: {e}")
-            return []
-
-    def get_store_totals(self) -> List[Dict[str, Any]]:
-        """
-        Get total cards and amount per store across all dates.
-
-        Returns:
-            List of store totals
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT
-                        s.merchant_id,
-                        s.store_name,
-                        s.org_code,
-                        COUNT(m.id) as days_with_data,
-                        SUM(m.cards_opened) as total_cards,
-                        SUM(m.total_amount) as total_amount,
-                        AVG(m.cards_opened) as avg_cards_per_day,
-                        AVG(m.total_amount) as avg_amount_per_day,
-                        MIN(m.date) as first_date,
-                        MAX(m.date) as last_date
-                    FROM stores s
-                    LEFT JOIN membership_card_data m ON s.merchant_id = m.merchant_id
-                    GROUP BY s.merchant_id, s.store_name, s.org_code
-                    ORDER BY s.org_code
-                """)
-
-                results = [dict(row) for row in cursor.fetchall()]
-                logger.info(f"Retrieved totals for {len(results)} stores")
-                return results
-
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving store totals: {e}")
-            return []
-
-    # ==================== Data Export ====================
-
-    def export_to_csv(
-        self,
-        output_path: str,
-        store_id: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
-    ):
-        """
-        Export membership data to CSV file.
-
-        Args:
-            output_path: Path to save the CSV file
-            store_id: Filter by merchant/store ID
-            start_date: Filter by start date
-            end_date: Filter by end date
-        """
-        try:
-            # Get data
-            data = self.get_membership_data(store_id, start_date, end_date)
-
-            if not data:
-                logger.warning("No data to export")
-                return
-
-            # Ensure output directory exists
-            output_file = Path(output_path)
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to CSV
-            with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
-                fieldnames = [
-                    'merchant_id', 'store_name', 'org_code', 'date',
-                    'cards_opened', 'total_amount', 'created_at'
-                ]
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-
-                for row in data:
-                    # Filter to only include specified fields
-                    filtered_row = {k: row.get(k) for k in fieldnames}
-                    writer.writerow(filtered_row)
-
-            logger.info(f"Exported {len(data)} records to CSV: {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error exporting to CSV: {e}")
-
-    def export_to_json(
-        self,
-        output_path: str,
-        store_id: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None
-    ) -> str:
-        """
-        Export membership data to JSON file.
-
-        Args:
-            output_path: Path to save the JSON file
-            store_id: Filter by merchant/store ID
-            start_date: Filter by start date
-            end_date: Filter by end date
-
-        Returns:
-            Path to the created JSON file
-        """
-        try:
-            # Get data
-            data = self.get_membership_data(store_id, start_date, end_date)
-
-            if not data:
-                logger.warning("No data to export")
-                return ""
-
-            # Ensure output directory exists
-            output_file = Path(output_path)
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Prepare export structure
-            export_data = {
-                "metadata": {
-                    "export_date": datetime.now().isoformat(),
-                    "record_count": len(data),
-                    "filters": {
-                        "store_id": store_id,
-                        "start_date": start_date,
-                        "end_date": end_date
-                    }
-                },
-                "data": data
-            }
-
-            # Write to JSON
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"Exported {len(data)} records to JSON: {output_path}")
-            return str(output_file)
-
-        except Exception as e:
-            logger.error(f"Error exporting to JSON: {e}")
-            return ""
-
-    def export_store_summary(self, output_path: str):
-        """
-        Export store totals summary to CSV.
-
-        Args:
-            output_path: Path to save the CSV file
-        """
-        try:
-            # Get store totals
-            data = self.get_store_totals()
-
-            if not data:
-                logger.warning("No data to export")
-                return
-
-            # Ensure output directory exists
-            output_file = Path(output_path)
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to CSV
-            with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
-                fieldnames = [
-                    'merchant_id', 'store_name', 'org_code', 'days_with_data',
-                    'total_cards', 'total_amount', 'avg_cards_per_day',
-                    'avg_amount_per_day', 'first_date', 'last_date'
-                ]
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(data)
-
-            logger.info(f"Exported store summary to CSV: {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error exporting store summary: {e}")
-
-    # ==================== Utility Methods ====================
-
-    def _validate_date(self, date_string: str) -> bool:
-        """
-        Validate date string format (YYYY-MM-DD).
-
-        Args:
-            date_string: Date string to validate
-
-        Returns:
-            True if valid, False otherwise
-        """
-        try:
-            datetime.strptime(date_string, '%Y-%m-%d')
-            return True
-        except ValueError:
-            return False
-
-    def get_schema_version(self) -> int:
-        """
-        Get the current database schema version.
-
-        Returns:
-            Schema version number
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT value FROM metadata WHERE key = 'schema_version'
-                """)
-                row = cursor.fetchone()
-                if row:
-                    return int(row['value'])
-                return 0
-        except sqlite3.Error:
-            return 0
-
-    def vacuum(self):
-        """
-        Optimize the database by running VACUUM.
-        This reclaims unused space and optimizes the database file.
-        """
-        try:
-            with self.get_connection() as conn:
-                conn.execute("VACUUM")
-                logger.info("Database vacuumed successfully")
-        except sqlite3.Error as e:
-            logger.error(f"Error vacuuming database: {e}")
-
-    def get_database_stats(self) -> Dict[str, Any]:
-        """
-        Get database statistics.
-
-        Returns:
-            Dictionary with database statistics
-        """
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-
-                stats = {}
-
-                # Get table counts
-                cursor.execute("SELECT COUNT(*) as count FROM stores")
-                stats['stores_count'] = cursor.fetchone()['count']
-
-                cursor.execute("SELECT COUNT(*) as count FROM membership_card_data")
-                stats['membership_records'] = cursor.fetchone()['count']
-
-                cursor.execute("SELECT COUNT(*) as count FROM card_details")
-                stats['card_details_count'] = cursor.fetchone()['count']
-
-                cursor.execute("SELECT COUNT(*) as count FROM crawl_log")
-                stats['crawl_log_count'] = cursor.fetchone()['count']
-
-                # Get date range
-                cursor.execute("""
-                    SELECT MIN(date) as min_date, MAX(date) as max_date
-                    FROM membership_card_data
-                """)
-                row = cursor.fetchone()
-                stats['data_date_range'] = {
-                    'start': row['min_date'],
-                    'end': row['max_date']
-                }
-
-                # Get database file size
-                stats['database_size_mb'] = self.db_path.stat().st_size / (1024 * 1024)
-                stats['database_path'] = str(self.db_path)
-
-                return stats
-
-        except sqlite3.Error as e:
-            logger.error(f"Error getting database stats: {e}")
-            return {}
 
 
 # Example usage and testing
@@ -1043,111 +456,72 @@ if __name__ == "__main__":
     print("\n=== Database Initialized ===")
     print(f"Database location: {db.db_path}")
 
-    # Display all stores
-    print("\n=== All Stores ===")
-    stores = db.get_all_stores()
-    for store in stores:
-        print(f"- {store['store_name']} (ID: {store['merchant_id']}, Code: {store['org_code']})")
-
     # Example: Save some test data
     print("\n=== Saving Test Data ===")
-    test_date = "2024-01-15"
-    test_store_id = "56756952"
+    test_records = [
+        {
+            "org_code": "MD00007",
+            "store_name": "宁桂杏山野烤肉（常熟世贸店）",
+            "date": "2025-12-11",
+            "package_name": "山海会员",
+            "unit_price": 168.0,
+            "quantity_sold": 5,
+            "total_sales": 840.0,
+            "refund_quantity": 0,
+            "refund_amount": 0.0
+        },
+        {
+            "org_code": "MD00007",
+            "store_name": "宁桂杏山野烤肉（常熟世贸店）",
+            "date": "2025-12-11",
+            "package_name": "基础会员",
+            "unit_price": 88.0,
+            "quantity_sold": 3,
+            "total_sales": 264.0,
+            "refund_quantity": 1,
+            "refund_amount": 88.0
+        },
+        {
+            "org_code": "MD00006",
+            "store_name": "宁桂杏山野烤肉（绵阳1958店）",
+            "date": "2025-12-11",
+            "package_name": "山海会员",
+            "unit_price": 168.0,
+            "quantity_sold": 2,
+            "total_sales": 336.0,
+            "refund_quantity": 0,
+            "refund_amount": 0.0
+        }
+    ]
 
-    if not db.data_exists(test_store_id, test_date, "membership_card"):
-        # Save membership data
-        membership_id = db.save_membership_data(
-            store_id=test_store_id,
-            store_name="宁桂杏山野烤肉（绵阳1958店）",
-            date=test_date,
-            cards_opened=5,
-            total_amount=1500.00,
-            card_details=[
-                {
-                    "card_id": "MC001",
-                    "amount": 300.00,
-                    "card_type": "山海会员",
-                    "transaction_time": "2024-01-15 10:30:00"
-                },
-                {
-                    "card_id": "MC002",
-                    "amount": 500.00,
-                    "card_type": "山海会员",
-                    "transaction_time": "2024-01-15 14:20:00"
-                },
-                {
-                    "card_id": "MC003",
-                    "amount": 200.00,
-                    "card_type": "基础会员",
-                    "transaction_time": "2024-01-15 16:45:00"
-                },
-                {
-                    "card_id": "MC004",
-                    "amount": 300.00,
-                    "card_type": "山海会员",
-                    "transaction_time": "2024-01-15 18:10:00"
-                },
-                {
-                    "card_id": "MC005",
-                    "amount": 200.00,
-                    "card_type": "基础会员",
-                    "transaction_time": "2024-01-15 19:30:00"
-                }
-            ]
-        )
+    saved = db.save_equity_package_sales(test_records)
+    print(f"Saved {saved} records")
 
-        print(f"Saved membership data with ID: {membership_id}")
-
-        # Log the crawl
-        db.log_crawl(
-            store_id=test_store_id,
-            crawler_type="membership_card",
-            date=test_date,
-            status="success",
-            records_count=5
-        )
-        print("Logged crawl operation")
-    else:
-        print(f"Data already exists for {test_store_id} on {test_date}")
+    # Display all stores
+    print("\n=== All Stores ===")
+    stores = db.get_stores()
+    for store in stores:
+        print(f"- {store['store_name']} ({store['org_code']})")
 
     # Query data
-    print("\n=== Querying Data ===")
-    membership_data = db.get_membership_data(store_id=test_store_id)
-    print(f"Found {len(membership_data)} membership records")
-    for record in membership_data:
-        print(f"  {record['date']}: {record['cards_opened']} cards, {record['total_amount']:.2f} yuan")
+    print("\n=== Query All Sales ===")
+    sales = db.get_equity_sales()
+    print(f"Found {len(sales)} sales records")
+    for record in sales:
+        print(f"  {record['date']} | {record['org_code']} | {record['package_name']}: "
+              f"{record['quantity_sold']} sold = ¥{record['total_sales']}")
 
-    # Get daily summary
-    print("\n=== Daily Summary ===")
-    summary = db.get_daily_summary()
-    for day in summary:
-        print(f"{day['date']}: {day['total_cards']} cards, {day['total_amount']:.2f} yuan")
+    # Query by store
+    print("\n=== Query Sales for MD00007 ===")
+    sales = db.get_equity_sales(org_code="MD00007")
+    for record in sales:
+        print(f"  {record['date']} | {record['package_name']}: "
+              f"{record['quantity_sold']} sold = ¥{record['total_sales']}")
 
-    # Get store totals
-    print("\n=== Store Totals ===")
-    totals = db.get_store_totals()
-    for store_total in totals:
-        if store_total['total_cards']:
-            print(
-                f"{store_total['store_name']}: "
-                f"{store_total['total_cards']} cards, "
-                f"{store_total['total_amount']:.2f} yuan "
-                f"(avg {store_total['avg_cards_per_day']:.1f} cards/day)"
-            )
+    # Check if data exists
+    print("\n=== Check Data Existence ===")
+    exists = db.data_exists("MD00007", "2025-12-11", "山海会员")
+    print(f"MD00007 / 山海会员 / 2025-12-11 exists: {exists}")
 
-    # Database statistics
-    print("\n=== Database Statistics ===")
-    stats = db.get_database_stats()
-    print(f"Stores: {stats['stores_count']}")
-    print(f"Membership records: {stats['membership_records']}")
-    print(f"Card details: {stats['card_details_count']}")
-    print(f"Crawl logs: {stats['crawl_log_count']}")
-    print(f"Date range: {stats['data_date_range']['start']} to {stats['data_date_range']['end']}")
-    print(f"Database size: {stats['database_size_mb']:.2f} MB")
-
-    # Export examples
-    print("\n=== Export Examples ===")
-    db.export_to_csv("reports/membership_data.csv")
-    db.export_to_json("reports/membership_data.json")
-    db.export_store_summary("reports/store_summary.csv")
-    print("Exports completed")
+    exists = db.data_exists("MD00999", "2025-12-11", "山海会员")
+    print(f"MD00999 / 山海会员 / 2025-12-11 exists: {exists}")

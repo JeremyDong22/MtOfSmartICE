@@ -8,11 +8,19 @@ Meituan Merchant Backend Crawler - automated daily crawler for Meituan merchant 
 
 ## Common Commands
 
-### Prerequisites (Run Chrome First)
+### Prerequisites
+The crawler now **automatically launches Chrome with CDP** if not already running. Just run `python src/main.py` and it will:
+1. Check if Chrome CDP is available on port 9222
+2. If not, launch a new Chrome instance with CDP
+3. If newly launched, prompt you to login first
+
 ```bash
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-profile
+# First run - will launch Chrome and ask you to login
+python src/main.py
+
+# After logging in, run again to crawl
+python src/main.py
 ```
-Then manually login to https://pos.meituan.com in the Chrome window.
 
 ### Run Crawler
 ```bash

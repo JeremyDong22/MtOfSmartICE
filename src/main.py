@@ -1,15 +1,13 @@
 """
 Daily Crawler - Main entry point for automated daily crawling
+v2.1 - Added conditional duplicate handling stats display
 
 This script:
-1. Connects to Chrome via CDP
-2. Gets yesterday's date (or override)
-3. Gets all stores from dashboard
-4. For each store:
-   - Switch to store
-   - Run MembershipCrawler
-   - Save results
-5. Print summary
+1. Ensures Chrome CDP is available (launches if needed)
+2. Connects to Chrome via CDP
+3. Runs EquityPackageSalesCrawler for 集团 account (aggregated data for all stores)
+4. Saves data to database
+5. Prints summary
 """
 
 import asyncio
@@ -23,10 +21,11 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.browser import CDPSession, StoreNavigator
-from src.crawlers.membership_crawler import MembershipCrawler
+from src.browser import CDPSession, StoreNavigator, ensure_cdp_available, get_cdp_url
+from src.crawlers.权益包售卖汇总表 import EquityPackageSalesCrawler
 from src.utils import get_yesterday, get_today
 from src.config import CDP_URL, LOG_DIR
+from src.browser.cdp_launcher import DEFAULT_CDP_PORT, DEFAULT_PROFILE_DIR, DEFAULT_STARTUP_URL
 from database.db_manager import DatabaseManager
 
 # Setup logging
@@ -46,32 +45,61 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """
-    Daily crawler - runs through all stores.
+    Main entry point - runs EquityPackageSalesCrawler (集团 aggregated).
     """
     args = parse_args()
 
     logger.info("=" * 80)
-    logger.info("Meituan Merchant Backend Daily Crawler")
+    logger.info("Meituan Merchant Backend Daily Crawler - Equity Package Sales")
     logger.info("=" * 80)
 
     # Determine target date
     target_date = args.date if args.date else get_yesterday()
-    logger.info(f"Target date: {target_date}")
+    end_date = args.end_date or target_date
+    logger.info(f"Date range: {target_date} to {end_date}")
 
     # Initialize database
     logger.info("Initializing database...")
     db = DatabaseManager()
 
+    # Ensure Chrome CDP is available (launch if needed)
+    cdp_port = DEFAULT_CDP_PORT
+    if args.cdp:
+        # Extract port from custom CDP URL if provided
+        cdp_url = args.cdp
+        if ":" in cdp_url.split("//")[-1]:
+            cdp_port = int(cdp_url.split(":")[-1])
+    else:
+        cdp_url = CDP_URL
+
+    logger.info("Ensuring Chrome CDP is available...")
+    cdp_success, was_launched = await ensure_cdp_available(
+        port=cdp_port,
+        profile_dir=DEFAULT_PROFILE_DIR,
+        startup_url=DEFAULT_STARTUP_URL
+    )
+
+    if not cdp_success:
+        logger.error("Failed to initialize Chrome CDP. Please start Chrome manually with:")
+        logger.error(f"  ./scripts/start_chrome_cdp.sh")
+        return
+
+    if was_launched:
+        logger.info("Launched new Chrome instance with CDP")
+        logger.info("Please login to Meituan in the browser window, then run this script again.")
+        return
+    else:
+        logger.info("Reusing existing Chrome CDP session")
+
     # Initialize CDP session
-    cdp_url = args.cdp if args.cdp else CDP_URL
     logger.info(f"Connecting to Chrome via CDP: {cdp_url}")
     session = CDPSession(cdp_url)
 
     results = {
-        "date": target_date,
-        "success": [],
-        "failed": [],
+        "date_range": f"{target_date} to {end_date}",
+        "success": False,
         "total_records": 0,
+        "error": None,
         "start_time": datetime.now().isoformat()
     }
 
@@ -81,121 +109,53 @@ async def main():
         page = await session.get_page()
         logger.info(f"Connected to browser. Current URL: {page.url}")
 
-        # Initialize store navigator
-        navigator = StoreNavigator(page)
+        # Get iframe (will be re-acquired by crawler)
+        frame = await get_report_frame(page)
 
-        # Navigate to dashboard
-        logger.info("Navigating to dashboard...")
-        if not await navigator.navigate_to_dashboard():
-            logger.error("Failed to navigate to dashboard")
-            return
+        # Initialize crawler
+        skip_nav = getattr(args, 'skip_navigation', False)
+        crawler = EquityPackageSalesCrawler(
+            page=page,
+            frame=frame,
+            db_manager=db,
+            target_date=target_date,
+            end_date=end_date,
+            skip_navigation=skip_nav
+        )
 
-        # Get all stores
-        logger.info("Getting all available stores...")
-        stores = await navigator.get_all_stores()
+        # Run crawler
+        logger.info("Running EquityPackageSalesCrawler for 集团 account...")
+        result = await crawler.crawl()
 
-        if not stores:
-            logger.warning("No stores found. Using fallback store list from database.")
-            # Fallback to database stores
-            stores = db.get_all_stores()
-            stores = [{"store_id": s["merchant_id"], "store_name": s["store_name"]} for s in stores]
+        if result["success"]:
+            logger.info("EquityPackageSalesCrawler completed successfully")
+            record_count = result["data"].get("record_count", 0)
+            save_stats = result["data"].get("save_stats", {})
+            results["success"] = True
+            results["total_records"] = record_count
+            results["save_stats"] = save_stats
 
-        if not stores:
-            logger.error("No stores available. Cannot proceed.")
-            return
+            # Print save statistics
+            logger.info(
+                f"Database: {save_stats.get('inserted', 0)} inserted, "
+                f"{save_stats.get('updated', 0)} updated, "
+                f"{save_stats.get('skipped', 0)} skipped"
+            )
 
-        logger.info(f"Found {len(stores)} stores to process")
-
-        # Filter stores if specified
-        if args.store:
-            stores = [s for s in stores if s["store_id"] == args.store]
-            if not stores:
-                logger.error(f"Store {args.store} not found")
-                return
-            logger.info(f"Filtered to single store: {stores[0]['store_name']}")
-
-        # Process each store
-        for idx, store in enumerate(stores, 1):
-            store_id = store["store_id"]
-            store_name = store["store_name"]
-
-            logger.info("")
-            logger.info("=" * 80)
-            logger.info(f"Processing store {idx}/{len(stores)}: {store_name}")
-            logger.info(f"Store ID: {store_id}")
-            logger.info("=" * 80)
-
-            try:
-                # Check if already crawled (skip if not forcing)
-                if not args.force and db.data_exists(store_id, target_date, "membership_card"):
-                    logger.info(f"Data already exists for {store_name} on {target_date} - skipping")
-                    continue
-
-                # Switch to store
-                logger.info(f"Switching to store: {store_name}")
-                if not await navigator.switch_to_store(store_id, store_name):
-                    logger.error(f"Failed to switch to store {store_name}")
-                    results["failed"].append({
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "error": "Failed to switch store"
-                    })
-                    continue
-
-                # Wait for page to update
-                await asyncio.sleep(2)
-
-                # Get the iframe for the crawler
-                frame = await get_report_frame(page)
-
-                # Initialize crawler
-                crawler = MembershipCrawler(
-                    page=page,
-                    frame=frame,
-                    db_manager=db,
-                    target_date=target_date
-                )
-
-                # Run crawler
-                logger.info(f"Starting crawl for {store_name}...")
-                result = await crawler.crawl(store_id, store_name)
-
-                if result["success"]:
-                    logger.info(f"Successfully crawled {store_name}")
-                    results["success"].append({
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "records": result["data"].get("order_count", 0)
-                    })
-                    results["total_records"] += result["data"].get("order_count", 0)
-                else:
-                    logger.error(f"Crawl failed for {store_name}: {result.get('error')}")
-                    results["failed"].append({
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "error": result.get("error", "Unknown error")
-                    })
-
-                # Navigate back to dashboard after each store's crawl
-                # This ensures we're on a page where store switching works
-                logger.info("Navigating back to dashboard for next store...")
-                await navigator.navigate_to_dashboard()
-                await asyncio.sleep(2)
-
-            except Exception as e:
-                logger.error(f"Error processing store {store_name}: {e}", exc_info=True)
-                results["failed"].append({
-                    "store_id": store_id,
-                    "store_name": store_name,
-                    "error": str(e)
-                })
-
-            # Brief pause between stores
-            if idx < len(stores):
-                await asyncio.sleep(2)
+            # Print sample data for verification
+            records = result["data"].get("records", [])
+            if records:
+                logger.info(f"Sample records (first 3):")
+                for rec in records[:3]:
+                    logger.info(f"  {rec.get('org_code')} | {rec.get('store_name')} | {rec.get('date')} | "
+                               f"{rec.get('package_name')} | {rec.get('quantity_sold')} sold | ¥{rec.get('total_sales')}")
+        else:
+            logger.error(f"EquityPackageSalesCrawler failed: {result.get('error')}")
+            results["error"] = result.get("error", "Unknown error")
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
+        results["error"] = str(e)
 
     finally:
         # Cleanup
@@ -240,22 +200,20 @@ def print_summary(results: Dict[str, Any]) -> None:
     logger.info("=" * 80)
     logger.info("CRAWL SUMMARY")
     logger.info("=" * 80)
-    logger.info(f"Date: {results['date']}")
+    logger.info(f"Date range: {results['date_range']}")
+    logger.info(f"Status: {'SUCCESS' if results['success'] else 'FAILED'}")
     logger.info(f"Total records extracted: {results['total_records']}")
-    logger.info(f"Successful stores: {len(results['success'])}")
-    logger.info(f"Failed stores: {len(results['failed'])}")
 
-    if results['success']:
-        logger.info("")
-        logger.info("Successful stores:")
-        for item in results['success']:
-            logger.info(f"  - {item['store_name']} ({item['store_id']}): {item['records']} records")
+    # Display save statistics if available
+    save_stats = results.get('save_stats', {})
+    if save_stats:
+        logger.info(f"Database operations:")
+        logger.info(f"  - Inserted (new): {save_stats.get('inserted', 0)}")
+        logger.info(f"  - Updated (higher values): {save_stats.get('updated', 0)}")
+        logger.info(f"  - Skipped (existing data not lower): {save_stats.get('skipped', 0)}")
 
-    if results['failed']:
-        logger.info("")
-        logger.info("Failed stores:")
-        for item in results['failed']:
-            logger.info(f"  - {item['store_name']} ({item['store_id']}): {item['error']}")
+    if results['error']:
+        logger.info(f"Error: {results['error']}")
 
     logger.info("=" * 80)
     logger.info(f"Start time: {results['start_time']}")
@@ -266,7 +224,7 @@ def print_summary(results: Dict[str, Any]) -> None:
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Meituan Merchant Backend Daily Crawler',
+        description='Meituan Merchant Backend Daily Crawler - Equity Package Sales',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -276,14 +234,17 @@ Examples:
   # Run for specific date
   python src/main.py --date 2025-12-13
 
-  # Run for specific store
-  python src/main.py --store 58188193
+  # Run for date range
+  python src/main.py --date 2025-12-09 --end-date 2025-12-15
 
   # Use custom CDP URL
   python src/main.py --cdp http://localhost:9223
 
   # Force re-crawl (ignore existing data)
   python src/main.py --force
+
+  # Skip navigation (for debugging, assumes page is already configured)
+  python src/main.py --skip-navigation
         """
     )
 
@@ -298,20 +259,26 @@ Examples:
         '--date',
         type=str,
         default=None,
-        help='Target date in YYYY-MM-DD format (default: yesterday)'
+        help='Target/start date in YYYY-MM-DD format (default: yesterday)'
     )
 
     parser.add_argument(
-        '--store',
+        '--end-date',
         type=str,
         default=None,
-        help='Crawl specific store only (merchant ID)'
+        help='End date for date range (default: same as start date)'
     )
 
     parser.add_argument(
         '--force',
         action='store_true',
         help='Force re-crawl even if data exists'
+    )
+
+    parser.add_argument(
+        '--skip-navigation',
+        action='store_true',
+        help='Skip page navigation and use current page state (for debugging)'
     )
 
     return parser.parse_args()
