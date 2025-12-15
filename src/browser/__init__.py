@@ -1,10 +1,9 @@
 """
 Browser management modules
-v1.1 - Added CDP launcher for automatic browser initialization
+v2.0 - Removed StoreNavigator (unused, current crawler uses 集团 account)
 """
 
 from .cdp_session import CDPSession
-from .store_navigator import StoreNavigator
 from .cdp_launcher import ensure_cdp_available, check_cdp_available, get_cdp_url
 
-__all__ = ['CDPSession', 'StoreNavigator', 'ensure_cdp_available', 'check_cdp_available', 'get_cdp_url']
+__all__ = ['CDPSession', 'ensure_cdp_available', 'check_cdp_available', 'get_cdp_url']

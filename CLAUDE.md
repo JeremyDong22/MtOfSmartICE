@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Meituan Merchant Backend Crawler - automated daily crawler for Meituan merchant backend membership card transaction data. Uses CDP-only browser connection (connects to existing Chrome, no browser launching).
+Meituan Merchant Backend Crawler - automated daily crawler for Meituan merchant backend 权益包售卖汇总表 (Equity Package Sales). Uses CDP-only browser connection and 集团账号 (group account) for aggregated data across all stores.
 
 ## Common Commands
 
 ### Prerequisites
-The crawler now **automatically launches Chrome with CDP** if not already running. Just run `python src/main.py` and it will:
+The crawler **automatically launches Chrome with CDP** if not already running. Just run `python src/main.py` and it will:
 1. Check if Chrome CDP is available on port 9222
 2. If not, launch a new Chrome instance with CDP
 3. If newly launched, prompt you to login first
@@ -24,17 +24,20 @@ python src/main.py
 
 ### Run Crawler
 ```bash
-# Daily crawl (yesterday's data, all stores)
+# Daily crawl (yesterday's data, all stores via 集团 account)
 python src/main.py
 
 # Specific date
 python src/main.py --date 2025-12-13
 
-# Single store
-python src/main.py --store 58188193
+# Date range
+python src/main.py --date 2025-12-09 --end-date 2025-12-15
 
 # Force re-crawl (ignore existing data)
 python src/main.py --force
+
+# Skip navigation (for debugging, assumes page is already configured)
+python src/main.py --skip-navigation
 
 # Custom CDP endpoint
 python src/main.py --cdp http://localhost:9223
@@ -44,11 +47,10 @@ python src/main.py --cdp http://localhost:9223
 ```bash
 sqlite3 data/meituan.db
 
-# View recent data
-SELECT s.store_name, m.date, m.cards_opened, m.total_amount
-FROM membership_card_data m
-JOIN stores s ON m.merchant_id = s.merchant_id
-ORDER BY m.date DESC LIMIT 20;
+# View recent equity package sales
+SELECT org_code, store_name, date, package_name, quantity_sold, total_sales
+FROM equity_package_sales
+ORDER BY date DESC LIMIT 20;
 ```
 
 ### View Logs
@@ -61,34 +63,31 @@ tail -f logs/crawler_$(date +%Y%m%d).log
 ```
 main.py
   ↓
+  CDPLauncher (browser/cdp_launcher.py)
+    └─ Ensure Chrome CDP is available (launch if needed)
+  ↓
   CDPSession (browser/cdp_session.py)
     └─ Connect to Chrome via CDP endpoint
   ↓
-  StoreNavigator (browser/store_navigator.py)
-    ├─ Navigate to dashboard
-    ├─ Get all stores from dropdown
-    └─ Switch between stores
-  ↓
-  MembershipCrawler (crawlers/membership_crawler.py)
+  EquityPackageSalesCrawler (crawlers/权益包售卖汇总表.py)
     ├─ Inherits from BaseCrawler
-    ├─ Navigate to report page
-    ├─ Set date filter
-    ├─ Select card type filters
-    ├─ Extract summary data
-    └─ Extract order details
+    ├─ Select 集团 account from selectorg page
+    ├─ Navigate to 营销中心 → 数据报表 → 权益包售卖汇总表
+    ├─ Configure filters (门店/日期 checkboxes, date range)
+    ├─ Extract all pages of data
+    └─ Save to database
   ↓
   DatabaseManager (database/db_manager.py)
-    ├─ Save membership data (UPSERT)
-    ├─ Log crawl status
+    ├─ Save equity package sales (UPSERT with conditional update)
     └─ Export reports
 ```
 
 ### Key Design Patterns
 
 - **CDP-only connection**: No `browser.launch()` - connects to existing Chrome with `--remote-debugging-port=9222`
-- **Abstract base class**: All crawlers inherit from `BaseCrawler` which provides date handling, popup dismissal, retry logic
-- **Store-aware data**: All tables store both `store_id` AND `store_name` together
-- **Crawl tracking**: `crawl_log` table tracks crawl status per store/date/type with `UNIQUE(merchant_id, crawler_type, date)`
+- **Group account (集团账号)**: Single crawl extracts data for all stores, no per-store switching needed
+- **Abstract base class**: Crawlers inherit from `BaseCrawler` which provides popup dismissal, iframe handling, result formatting
+- **Conditional duplicate handling**: Only updates existing records if new values are higher
 
 ### Adding New Crawlers
 
@@ -97,9 +96,9 @@ main.py
 from src.crawlers.base_crawler import BaseCrawler
 
 class NewCrawler(BaseCrawler):
-    async def crawl(self, store_id: str, store_name: str) -> Dict[str, Any]:
+    async def crawl(self, store_id: str = None, store_name: str = None) -> Dict[str, Any]:
         # Navigate, extract, save
-        return self.create_result(True, store_id, store_name, data=data)
+        return self.create_result(True, store_id or "GROUP", store_name or "集团", data=data)
 ```
 
 2. Update `main.py` to instantiate and run the new crawler
@@ -111,19 +110,16 @@ All settings in `src/config.py`:
 - `CDP_URL`: Chrome DevTools Protocol endpoint (default: `http://localhost:9222`)
 - `DB_PATH`: Database path
 - `MEITUAN_*_URL`: Target URLs
-- `DEFAULT_TIMEOUT`, `MAX_RETRIES`, `RETRY_DELAY`: Timing configuration
+- `DEFAULT_TIMEOUT`: Timeout configuration
 
 ## Database Schema
 
-- **stores**: merchant_id (PK), store_name, org_code
-- **membership_card_data**: merchant_id + date (UNIQUE), cards_opened, total_amount
-- **card_details**: Linked to membership_card_data via foreign key
-- **crawl_log**: merchant_id + crawler_type + date (UNIQUE), status, records_count, error_message
+- **equity_package_sales**: org_code + date + package_name (UNIQUE), store_name, unit_price, quantity_sold, total_sales, refund_quantity, refund_amount
 
 ## Important Notes
 
-- Chrome must be running with CDP before running crawler
+- Chrome CDP auto-launches if not running
 - Login session must be valid in Chrome
-- Store dropdown is in top-right header showing "商户号: XXXXXXXX"
+- Uses 集团账号 to get aggregated data for all stores in one crawl
 - Report iframe is `crm-smart` - crawler handles automatic iframe detection
-- Uses `--force` sparingly to avoid duplicate data processing
+- Conditional update: only overwrites existing records if new values are higher

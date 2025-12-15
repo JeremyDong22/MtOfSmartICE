@@ -1,13 +1,18 @@
 """
 Daily Crawler - Main entry point for automated daily crawling
-v2.1 - Added conditional duplicate handling stats display
+v2.3 - Simplified Supabase config (uses anon key by default)
 
 This script:
 1. Ensures Chrome CDP is available (launches if needed)
 2. Connects to Chrome via CDP
 3. Runs EquityPackageSalesCrawler for 集团 account (aggregated data for all stores)
-4. Saves data to database
-5. Prints summary
+4. Saves data to SQLite database (local)
+5. Uploads to Supabase cloud (always enabled with anon key)
+6. Prints summary
+
+Supabase Robustness:
+- Unknown stores are logged but don't block other records
+- Error isolation: one failed record won't affect others
 """
 
 import asyncio
@@ -21,13 +26,13 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# NOTE: StoreNavigator imported but not used - reserved for future multi-store individual crawling
-from src.browser import CDPSession, StoreNavigator, ensure_cdp_available, get_cdp_url
+from src.browser import CDPSession, ensure_cdp_available, get_cdp_url
 from src.crawlers.权益包售卖汇总表 import EquityPackageSalesCrawler
 from src.utils import get_yesterday, get_today
-from src.config import CDP_URL, LOG_DIR
+from src.config import CDP_URL, LOG_DIR, SUPABASE_ENABLED
 from src.browser.cdp_launcher import DEFAULT_CDP_PORT, DEFAULT_PROFILE_DIR, DEFAULT_STARTUP_URL
 from database.db_manager import DatabaseManager
+from database.supabase_manager import SupabaseManager
 
 # Setup logging
 log_file = Path(LOG_DIR) / f"crawler_{datetime.now().strftime('%Y%m%d')}.log"
@@ -136,15 +141,44 @@ async def main():
             results["total_records"] = record_count
             results["save_stats"] = save_stats
 
-            # Print save statistics
+            # Print SQLite save statistics
             logger.info(
-                f"Database: {save_stats.get('inserted', 0)} inserted, "
+                f"SQLite: {save_stats.get('inserted', 0)} inserted, "
                 f"{save_stats.get('updated', 0)} updated, "
                 f"{save_stats.get('skipped', 0)} skipped"
             )
 
-            # Print sample data for verification
+            # Upload to Supabase (always enabled unless --no-supabase flag)
             records = result["data"].get("records", [])
+            skip_supabase = getattr(args, 'no_supabase', False)
+
+            if records and not skip_supabase:
+                logger.info("Uploading to Supabase...")
+                supabase_stats = upload_to_supabase(records)
+                results["supabase_stats"] = supabase_stats
+
+                # Log Supabase results
+                logger.info(
+                    f"Supabase: {supabase_stats.get('inserted', 0)} inserted, "
+                    f"{supabase_stats.get('updated', 0)} updated, "
+                    f"{supabase_stats.get('skipped', 0)} skipped, "
+                    f"{supabase_stats.get('failed', 0)} failed"
+                )
+
+                # Warn about unknown stores
+                unknown_stores = supabase_stats.get('unknown_stores', [])
+                if unknown_stores:
+                    logger.warning(
+                        f"未知门店 ({len(unknown_stores)}个): "
+                        f"{[s['org_code'] for s in unknown_stores]}"
+                    )
+                    logger.warning(
+                        "请在 master_restaurant 表中添加 meituan_org_code 映射"
+                    )
+            elif skip_supabase:
+                logger.info("Supabase upload skipped (--no-supabase flag)")
+
+            # Print sample data for verification
             if records:
                 logger.info(f"Sample records (first 3):")
                 for rec in records[:3]:
@@ -190,6 +224,41 @@ async def get_report_frame(page):
     return page
 
 
+def upload_to_supabase(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Upload crawled records to Supabase with robust error handling.
+
+    This function implements error isolation - each record is processed independently.
+    If one store is unknown (e.g., MD00012 not mapped), other stores continue normally.
+
+    Args:
+        records: List of crawled records with org_code, store_name, date, etc.
+
+    Returns:
+        Stats dictionary with inserted, updated, skipped, failed counts
+        and list of unknown_stores
+    """
+    try:
+        # Initialize Supabase manager (will use cached connection if available)
+        supabase_mgr = SupabaseManager()
+
+        # Save records - this handles error isolation internally
+        stats = supabase_mgr.save_equity_package_sales(records)
+
+        return stats
+
+    except Exception as e:
+        logger.error(f"Supabase upload error: {e}")
+        return {
+            "inserted": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": len(records),
+            "unknown_stores": [],
+            "error": str(e)
+        }
+
+
 def print_summary(results: Dict[str, Any]) -> None:
     """
     Print crawl summary.
@@ -205,13 +274,31 @@ def print_summary(results: Dict[str, Any]) -> None:
     logger.info(f"Status: {'SUCCESS' if results['success'] else 'FAILED'}")
     logger.info(f"Total records extracted: {results['total_records']}")
 
-    # Display save statistics if available
+    # Display SQLite save statistics
     save_stats = results.get('save_stats', {})
     if save_stats:
-        logger.info(f"Database operations:")
+        logger.info(f"SQLite Database:")
         logger.info(f"  - Inserted (new): {save_stats.get('inserted', 0)}")
         logger.info(f"  - Updated (higher values): {save_stats.get('updated', 0)}")
         logger.info(f"  - Skipped (existing data not lower): {save_stats.get('skipped', 0)}")
+
+    # Display Supabase statistics if available
+    supabase_stats = results.get('supabase_stats', {})
+    if supabase_stats:
+        logger.info(f"Supabase Cloud:")
+        logger.info(f"  - Inserted: {supabase_stats.get('inserted', 0)}")
+        logger.info(f"  - Updated: {supabase_stats.get('updated', 0)}")
+        logger.info(f"  - Skipped: {supabase_stats.get('skipped', 0)}")
+        logger.info(f"  - Failed: {supabase_stats.get('failed', 0)}")
+
+        # Report unknown stores
+        unknown_stores = supabase_stats.get('unknown_stores', [])
+        if unknown_stores:
+            logger.info(f"  - Unknown stores (need mapping): {len(unknown_stores)}")
+            for store in unknown_stores[:5]:  # Show first 5
+                logger.info(f"      {store['org_code']}: {store['store_name']}")
+            if len(unknown_stores) > 5:
+                logger.info(f"      ... and {len(unknown_stores) - 5} more")
 
     if results['error']:
         logger.info(f"Error: {results['error']}")
@@ -246,6 +333,11 @@ Examples:
 
   # Skip navigation (for debugging, assumes page is already configured)
   python src/main.py --skip-navigation
+
+  # Skip Supabase upload (SQLite only)
+  python src/main.py --no-supabase
+
+Note: Supabase upload is enabled by default using anon key.
         """
     )
 
@@ -280,6 +372,12 @@ Examples:
         '--skip-navigation',
         action='store_true',
         help='Skip page navigation and use current page state (for debugging)'
+    )
+
+    parser.add_argument(
+        '--no-supabase',
+        action='store_true',
+        help='Skip Supabase upload, save to SQLite only'
     )
 
     return parser.parse_args()
