@@ -125,13 +125,12 @@ All settings in `src/config.py`:
 
 ## Database Schema
 
-### Local SQLite (`database/meituan_data.db`)
-- **mt_stores**: org_code (PK), store_name
-- **mt_equity_package_sales**: org_code + date + package_name (UNIQUE), unit_price, quantity_sold, total_sales, refund_quantity, refund_amount
+详细 schema 和门店映射表见 [database/SCHEMA.md](database/SCHEMA.md)。
 
-### Cloud Supabase
-- **master_restaurant**: id (UUID), restaurant_name, meituan_org_code (maps to org_code)
-- **mt_equity_package_sales**: restaurant_id (FK) + date + package_name (UNIQUE), same fields as SQLite
+**快速参考**:
+- **Local SQLite** (`database/meituan_data.db`): `mt_stores`, `mt_equity_package_sales`
+- **Cloud Supabase**: `master_restaurant`, `mt_equity_package_sales`
+- **映射关系**: org_code (美团) ↔ restaurant_id (Supabase)
 
 ## Important Notes
 
