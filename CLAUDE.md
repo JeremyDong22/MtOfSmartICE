@@ -61,6 +61,18 @@ ORDER BY date DESC LIMIT 20;
 tail -f logs/crawler_$(date +%Y%m%d).log
 ```
 
+### Linux Deployment (Cron)
+```bash
+# Auto-setup cron job (daily at midnight)
+./scripts/setup_cron.sh
+
+# Verify cron is set
+crontab -l
+
+# View cron logs
+tail -f /tmp/meituan-crawler.log
+```
+
 ## Architecture
 
 ```
