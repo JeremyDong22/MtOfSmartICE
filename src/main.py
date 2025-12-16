@@ -1,6 +1,6 @@
 """
 Daily Crawler - Main entry point for automated daily crawling
-v2.3 - Simplified Supabase config (uses anon key by default)
+v2.4 - Default to 3-day range for cron reliability
 
 This script:
 1. Ensures Chrome CDP is available (launches if needed)
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.browser import CDPSession, ensure_cdp_available, get_cdp_url
 from src.crawlers.权益包售卖汇总表 import EquityPackageSalesCrawler
-from src.utils import get_yesterday, get_today
+from src.utils import get_yesterday, get_today, get_days_ago
 from src.config import CDP_URL, LOG_DIR, SUPABASE_ENABLED
 from src.browser.cdp_launcher import DEFAULT_CDP_PORT, DEFAULT_PROFILE_DIR, DEFAULT_STARTUP_URL
 from database.db_manager import DatabaseManager
@@ -59,9 +59,10 @@ async def main():
     logger.info("Meituan Merchant Backend Daily Crawler - Equity Package Sales")
     logger.info("=" * 80)
 
-    # Determine target date
-    target_date = args.date if args.date else get_yesterday()
-    end_date = args.end_date or target_date
+    # Determine target date range
+    # Default: 3 days ago to yesterday (for cron reliability)
+    target_date = args.date if args.date else get_days_ago(3)
+    end_date = args.end_date if args.end_date else get_yesterday()
     logger.info(f"Date range: {target_date} to {end_date}")
 
     # Initialize database
@@ -352,14 +353,14 @@ Note: Supabase upload is enabled by default using anon key.
         '--date',
         type=str,
         default=None,
-        help='Target/start date in YYYY-MM-DD format (default: yesterday)'
+        help='Target/start date in YYYY-MM-DD format (default: 3 days ago)'
     )
 
     parser.add_argument(
         '--end-date',
         type=str,
         default=None,
-        help='End date for date range (default: same as start date)'
+        help='End date for date range (default: yesterday)'
     )
 
     parser.add_argument(
