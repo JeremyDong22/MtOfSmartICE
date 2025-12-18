@@ -15,6 +15,19 @@ def get_yesterday() -> str:
     return (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
 
+def get_days_ago(days: int) -> str:
+    """
+    Return date N days ago as YYYY-MM-DD string.
+
+    Args:
+        days: Number of days ago
+
+    Returns:
+        str: Date in YYYY-MM-DD format
+    """
+    return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+
 def get_today() -> str:
     """
     Return today's date as YYYY-MM-DD string.
