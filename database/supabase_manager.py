@@ -1,5 +1,9 @@
 """
 Supabase Database Manager for Meituan Crawler
+v1.6 - Fixed timeout issues with retry logic and smaller batches
+     - Reduced batch size from 100 to 50 for reliability
+     - Added exponential backoff retry (3 attempts)
+     - Added HTTP timeout configuration (30s)
 v1.5 - Optimized save_business_summary with batch upsert (single HTTP request)
      - Previous: 2 HTTP requests per record (GET check + POST/PATCH)
      - Now: 1 HTTP request for ALL records using upsert with on_conflict
@@ -12,6 +16,7 @@ Key Features:
 - Error isolation: one failed record won't affect others
 - Conditional update: only updates if new values are higher
 - Uses anon key by default - no service role key required
+- Retry with exponential backoff for network issues
 
 Mapping Strategy:
 - equity_package_sales: uses org_code (MD00007) → master_restaurant.meituan_org_code
@@ -27,10 +32,13 @@ Usage:
 
 import os
 import logging
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from supabase import create_client, Client
+from supabase.lib.client_options import SyncClientOptions
+import httpx
 
 # Import config for default values
 from src.config import SUPABASE_URL as DEFAULT_URL, SUPABASE_KEY as DEFAULT_KEY
@@ -60,6 +68,12 @@ class SupabaseManager:
     Implements robust error handling to ensure one failed record doesn't block others.
     """
 
+    # Batch and retry configuration
+    BATCH_SIZE = 50  # Reduced from 100 for reliability
+    MAX_RETRIES = 3
+    INITIAL_RETRY_DELAY = 2  # seconds
+    HTTP_TIMEOUT = 30  # seconds
+
     def __init__(
         self,
         supabase_url: Optional[str] = None,
@@ -75,15 +89,53 @@ class SupabaseManager:
         self.supabase_url = supabase_url or DEFAULT_URL
         self.supabase_key = supabase_key or DEFAULT_KEY
 
-        # Initialize client - anon key is always available
-        self._client: Client = create_client(self.supabase_url, self.supabase_key)
+        # Initialize client with extended timeout using SyncClientOptions
+        self._client: Client = create_client(
+            self.supabase_url,
+            self.supabase_key,
+            options=SyncClientOptions(
+                postgrest_client_timeout=self.HTTP_TIMEOUT,
+            )
+        )
         logger.info(f"Supabase client initialized for: {self.supabase_url}")
 
-        # Cache for org_code -> restaurant_id mappings
+        # Initialize caches
         self._restaurant_cache: Dict[str, str] = {}
-        # Cache for restaurant_name -> restaurant_id mappings (for business_summary)
         self._restaurant_name_cache: Dict[str, str] = {}
         self._cache_loaded = False
+
+    def _retry_with_backoff(self, operation, batch_num: int, total_batches: int) -> bool:
+        """
+        Execute an operation with exponential backoff retry.
+
+        Args:
+            operation: Callable that performs the database operation
+            batch_num: Current batch number (for logging)
+            total_batches: Total number of batches (for logging)
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        delay = self.INITIAL_RETRY_DELAY
+
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                operation()
+                return True
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < self.MAX_RETRIES:
+                    logger.warning(
+                        f"Batch {batch_num}/{total_batches} attempt {attempt}/{self.MAX_RETRIES} failed: {error_msg}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"Batch {batch_num}/{total_batches} failed after {self.MAX_RETRIES} attempts: {error_msg}")
+                    return False
+
+        return False
 
     def _load_restaurant_cache(self) -> None:
         """
@@ -496,30 +548,29 @@ class SupabaseManager:
 
             valid_records.append(supabase_record)
 
-        # Phase 2: Batch upsert all valid records
-        # Reduced to 100 to avoid network timeout errors on large batches
-        BATCH_SIZE = 100
+        # Phase 2: Batch upsert all valid records with retry logic
         if valid_records:
-            total_batches = (len(valid_records) + BATCH_SIZE - 1) // BATCH_SIZE
-            logger.info(f"Batch upserting {len(valid_records)} records in {total_batches} batch(es)...")
+            total_batches = (len(valid_records) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+            logger.info(f"Batch upserting {len(valid_records)} records in {total_batches} batch(es) (batch_size={self.BATCH_SIZE})...")
 
-            for i in range(0, len(valid_records), BATCH_SIZE):
-                batch = valid_records[i:i + BATCH_SIZE]
-                batch_num = (i // BATCH_SIZE) + 1
+            for i in range(0, len(valid_records), self.BATCH_SIZE):
+                batch = valid_records[i:i + self.BATCH_SIZE]
+                batch_num = (i // self.BATCH_SIZE) + 1
 
-                try:
-                    # Use upsert with on_conflict for unique constraint (restaurant_id, 营业日期)
-                    result = self._client.table('mt_business_summary').upsert(
+                # Define the upsert operation for retry wrapper
+                def do_upsert():
+                    self._client.table('mt_business_summary').upsert(
                         batch,
                         on_conflict='restaurant_id,营业日期'
                     ).execute()
 
-                    # Supabase upsert doesn't distinguish insert vs update in response
+                # Execute with retry
+                success = self._retry_with_backoff(do_upsert, batch_num, total_batches)
+
+                if success:
                     stats["updated"] += len(batch)
                     logger.info(f"Batch {batch_num}/{total_batches}: {len(batch)} records processed")
-
-                except Exception as e:
-                    logger.error(f"Batch {batch_num}/{total_batches} failed: {e}")
+                else:
                     stats["failed"] += len(batch)
 
         # Log summary
