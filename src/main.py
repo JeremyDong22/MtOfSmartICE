@@ -1,5 +1,5 @@
 # Daily Crawler - Unified entry point for multi-site crawling
-# v3.2 - Added Supabase upload for business_summary (综合营业统计)
+# v3.3 - Support multiple reports in single run (--report all)
 #   - Browser layer: cdp_launcher.py (CDP detect + launch)
 #   - Site layer: sites/ (website navigation)
 #   - Crawler layer: crawlers/ (data extraction)
@@ -68,6 +68,7 @@ SITES = {
 async def main():
     """
     Main entry point - runs crawlers based on command line arguments.
+    Supports multiple reports in a single run with --report all or --report r1 r2.
     """
     args = parse_args()
 
@@ -83,6 +84,21 @@ async def main():
 
     site_config = SITES[site_key]
     logger.info(f"Site: {site_config['name']} ({site_key})")
+
+    # Determine which reports to run
+    available_reports = list(site_config["reports"].keys())
+    if args.report == ["all"]:
+        reports_to_run = available_reports
+    else:
+        # Validate all requested reports exist
+        reports_to_run = []
+        for report_key in args.report:
+            if report_key not in site_config["reports"]:
+                logger.error(f"Unknown report: {report_key}. Available for {site_key}: {available_reports}")
+                return
+            reports_to_run.append(report_key)
+
+    logger.info(f"Reports to run: {reports_to_run}")
 
     # Determine target date
     target_date = args.date if args.date else get_yesterday()
@@ -127,14 +143,8 @@ async def main():
     logger.info(f"Connecting to Chrome via CDP: {cdp_url}")
     session = CDPSession(cdp_url)
 
-    results = {
-        "site": site_key,
-        "date_range": f"{target_date} to {end_date}",
-        "success": False,
-        "total_records": 0,
-        "error": None,
-        "start_time": datetime.now().isoformat()
-    }
+    # Track results for all reports
+    all_results = []
 
     try:
         await session.connect()
@@ -147,82 +157,99 @@ async def main():
         site_class = site_config["class"]
         site = site_class(page)
 
-        # Validate report
-        report_key = args.report
-        if report_key not in site_config["reports"]:
-            available = list(site_config["reports"].keys())
-            logger.error(f"Unknown report: {report_key}. Available for {site_key}: {available}")
-            return
+        # Run each report sequentially
+        for report_idx, report_key in enumerate(reports_to_run):
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info(f"REPORT {report_idx + 1}/{len(reports_to_run)}: {report_key}")
+            logger.info("=" * 60)
 
-        # Navigate to report using site layer
-        logger.info(f"Navigating to report: {report_key}")
-        if not args.skip_navigation:
-            nav_success = await site.navigate_to_report(report_key)
-            if not nav_success:
-                results["error"] = "Navigation failed"
-                return
-        else:
-            logger.info("SKIP_NAVIGATION: Using current page state")
+            results = {
+                "site": site_key,
+                "report": report_key,
+                "date_range": f"{target_date} to {end_date}",
+                "success": False,
+                "total_records": 0,
+                "error": None,
+                "start_time": datetime.now().isoformat()
+            }
 
-        # Get frame from site
-        frame = site.get_frame()
+            try:
+                # Navigate to report using site layer
+                logger.info(f"Navigating to report: {report_key}")
+                if not args.skip_navigation:
+                    nav_success = await site.navigate_to_report(report_key)
+                    if not nav_success:
+                        results["error"] = "Navigation failed"
+                        all_results.append(results)
+                        continue
+                else:
+                    logger.info("SKIP_NAVIGATION: Using current page state")
 
-        # Initialize and run crawler
-        crawler_class = site_config["reports"][report_key]
-        crawler = crawler_class(
-            page=page,
-            frame=frame,
-            db_manager=db,
-            target_date=target_date,
-            end_date=end_date,
-            skip_navigation=args.skip_navigation,
-            force_update=args.force
-        )
+                # Get frame from site
+                frame = site.get_frame()
 
-        logger.info(f"Running {crawler_class.__name__}...")
-        result = await crawler.crawl()
-
-        if result["success"]:
-            logger.info("Crawl completed successfully")
-            record_count = result["data"].get("record_count", 0)
-            save_stats = result["data"].get("save_stats", {})
-            results["success"] = True
-            results["total_records"] = record_count
-            results["save_stats"] = save_stats
-
-            logger.info(
-                f"SQLite: {save_stats.get('inserted', 0)} inserted, "
-                f"{save_stats.get('updated', 0)} updated, "
-                f"{save_stats.get('skipped', 0)} skipped"
-            )
-
-            # Upload to Supabase
-            records = result["data"].get("records", [])
-            if records and not args.no_supabase:
-                logger.info("Uploading to Supabase...")
-                supabase_stats = upload_to_supabase(records, report_key)
-                results["supabase_stats"] = supabase_stats
-
-                logger.info(
-                    f"Supabase: {supabase_stats.get('inserted', 0)} inserted, "
-                    f"{supabase_stats.get('updated', 0)} updated, "
-                    f"{supabase_stats.get('failed', 0)} failed"
+                # Initialize and run crawler
+                crawler_class = site_config["reports"][report_key]
+                crawler = crawler_class(
+                    page=page,
+                    frame=frame,
+                    db_manager=db,
+                    target_date=target_date,
+                    end_date=end_date,
+                    skip_navigation=args.skip_navigation,
+                    force_update=args.force
                 )
-            elif args.no_supabase:
-                logger.info("Supabase upload skipped (--no-supabase)")
-        else:
-            logger.error(f"Crawl failed: {result.get('error')}")
-            results["error"] = result.get("error")
+
+                logger.info(f"Running {crawler_class.__name__}...")
+                result = await crawler.crawl()
+
+                if result["success"]:
+                    logger.info("Crawl completed successfully")
+                    record_count = result["data"].get("record_count", 0)
+                    save_stats = result["data"].get("save_stats", {})
+                    results["success"] = True
+                    results["total_records"] = record_count
+                    results["save_stats"] = save_stats
+
+                    logger.info(
+                        f"SQLite: {save_stats.get('inserted', 0)} inserted, "
+                        f"{save_stats.get('updated', 0)} updated, "
+                        f"{save_stats.get('skipped', 0)} skipped"
+                    )
+
+                    # Upload to Supabase
+                    records = result["data"].get("records", [])
+                    if records and not args.no_supabase:
+                        logger.info("Uploading to Supabase...")
+                        supabase_stats = upload_to_supabase(records, report_key)
+                        results["supabase_stats"] = supabase_stats
+
+                        logger.info(
+                            f"Supabase: {supabase_stats.get('inserted', 0)} inserted, "
+                            f"{supabase_stats.get('updated', 0)} updated, "
+                            f"{supabase_stats.get('failed', 0)} failed"
+                        )
+                    elif args.no_supabase:
+                        logger.info("Supabase upload skipped (--no-supabase)")
+                else:
+                    logger.error(f"Crawl failed: {result.get('error')}")
+                    results["error"] = result.get("error")
+
+            except Exception as e:
+                logger.error(f"Error in {report_key}: {e}", exc_info=True)
+                results["error"] = str(e)
+
+            results["end_time"] = datetime.now().isoformat()
+            all_results.append(results)
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        results["error"] = str(e)
 
     finally:
         logger.info("Closing browser connection...")
         await session.close()
-        results["end_time"] = datetime.now().isoformat()
-        print_summary(results)
+        print_multi_summary(all_results)
 
 
 def upload_to_supabase(records: List[Dict[str, Any]], report_type: str) -> Dict[str, Any]:
@@ -250,32 +277,48 @@ def upload_to_supabase(records: List[Dict[str, Any]], report_type: str) -> Dict[
         return {"inserted": 0, "updated": 0, "failed": len(records), "error": str(e)}
 
 
-def print_summary(results: Dict[str, Any]) -> None:
-    """Print crawl summary."""
+def print_multi_summary(all_results: List[Dict[str, Any]]) -> None:
+    """Print summary for multiple reports."""
     logger.info("")
     logger.info("=" * 80)
     logger.info("CRAWL SUMMARY")
     logger.info("=" * 80)
-    logger.info(f"Site: {results.get('site', 'unknown')}")
-    logger.info(f"Date range: {results['date_range']}")
-    logger.info(f"Status: {'SUCCESS' if results['success'] else 'FAILED'}")
-    logger.info(f"Total records: {results['total_records']}")
 
-    save_stats = results.get('save_stats', {})
-    if save_stats:
-        logger.info(f"SQLite: {save_stats.get('inserted', 0)} ins, "
-                   f"{save_stats.get('updated', 0)} upd, "
-                   f"{save_stats.get('skipped', 0)} skip")
+    if not all_results:
+        logger.info("No reports were run.")
+        return
 
-    supabase_stats = results.get('supabase_stats', {})
-    if supabase_stats:
-        logger.info(f"Supabase: {supabase_stats.get('inserted', 0)} ins, "
-                   f"{supabase_stats.get('updated', 0)} upd, "
-                   f"{supabase_stats.get('failed', 0)} fail")
+    total_records = 0
+    total_success = 0
 
-    if results['error']:
-        logger.info(f"Error: {results['error']}")
+    for results in all_results:
+        report_name = results.get('report', 'unknown')
+        status = 'SUCCESS' if results['success'] else 'FAILED'
+        records = results.get('total_records', 0)
+        total_records += records
 
+        if results['success']:
+            total_success += 1
+
+        logger.info(f"  [{status}] {report_name}: {records} records")
+
+        save_stats = results.get('save_stats', {})
+        if save_stats:
+            logger.info(f"          SQLite: {save_stats.get('inserted', 0)} ins, "
+                       f"{save_stats.get('updated', 0)} upd, "
+                       f"{save_stats.get('skipped', 0)} skip")
+
+        supabase_stats = results.get('supabase_stats', {})
+        if supabase_stats:
+            logger.info(f"          Supabase: {supabase_stats.get('inserted', 0)} ins, "
+                       f"{supabase_stats.get('updated', 0)} upd, "
+                       f"{supabase_stats.get('failed', 0)} fail")
+
+        if results.get('error'):
+            logger.info(f"          Error: {results['error']}")
+
+    logger.info("-" * 80)
+    logger.info(f"TOTAL: {total_success}/{len(all_results)} reports succeeded, {total_records} records")
     logger.info("=" * 80)
 
 
@@ -289,14 +332,17 @@ Examples:
   # 美团管家 - 权益包售卖汇总表 (default)
   python src/main.py
 
+  # Run both crawlers sequentially
+  python src/main.py --report all
+
+  # Run specific crawlers
+  python src/main.py --report equity_package_sales business_summary
+
+  # 3-day lookback for cron
+  python src/main.py --report all --date 2025-12-15 --end-date 2025-12-17
+
   # Specific date
   python src/main.py --date 2025-12-13
-
-  # Date range
-  python src/main.py --date 2025-12-09 --end-date 2025-12-15
-
-  # 大众点评 (when implemented)
-  python src/main.py --site dianping --report store_review
 
   # Skip navigation (debugging)
   python src/main.py --skip-navigation
@@ -317,8 +363,9 @@ Examples:
     parser.add_argument(
         '--report',
         type=str,
-        default='equity_package_sales',
-        help='Report to crawl (default: equity_package_sales)'
+        nargs='+',
+        default=['equity_package_sales'],
+        help='Report(s) to crawl. Use "all" for all reports (default: equity_package_sales)'
     )
 
     parser.add_argument(

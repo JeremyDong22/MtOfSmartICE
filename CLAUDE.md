@@ -34,7 +34,13 @@ python src/main.py
 python src/main.py
 
 # 美团管家 - 综合营业统计
-python src/main.py --site guanjia --report business_summary
+python src/main.py --report business_summary
+
+# Run ALL crawlers sequentially (recommended for cron)
+python src/main.py --report all
+
+# Run specific crawlers sequentially
+python src/main.py --report equity_package_sales business_summary
 
 # Specific date (default: yesterday)
 python src/main.py --date 2025-12-13
@@ -78,15 +84,14 @@ tail -f logs/crawler_$(date +%Y%m%d).log
 
 ### Linux Deployment (Cron)
 
-**Run both crawlers daily at midnight, crawling 3 days back until yesterday:**
+**Run all crawlers daily at midnight, crawling 3 days back until yesterday:**
 
 ```bash
 # Manual cron setup - add to crontab -e
 # Runs at 00:00 daily, crawls 3 days back (e.g., Dec 15-17 if today is Dec 18)
+# Uses --report all to run both equity_package_sales and business_summary sequentially
 
-0 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report equity_package_sales --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
-
-5 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report business_summary --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
+0 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report all --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
 ```
 
 **Or use the setup script:**
