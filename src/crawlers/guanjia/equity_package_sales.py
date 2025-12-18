@@ -44,7 +44,8 @@ class EquityPackageSalesCrawler(BaseCrawler):
         db_manager,
         target_date: str,
         end_date: str = None,
-        skip_navigation: bool = False
+        skip_navigation: bool = False,
+        force_update: bool = False
     ):
         """
         Initialize the crawler.
@@ -56,10 +57,12 @@ class EquityPackageSalesCrawler(BaseCrawler):
             target_date: Start date in YYYY-MM-DD format
             end_date: End date (defaults to target_date)
             skip_navigation: If True, skip filter configuration
+            force_update: If True, force update existing records
         """
         super().__init__(page, frame, db_manager, target_date)
         self.end_date = end_date or target_date
         self.skip_navigation = skip_navigation
+        self.force_update = force_update
 
     async def crawl(self, store_id: str = None, store_name: str = None) -> Dict[str, Any]:
         """
