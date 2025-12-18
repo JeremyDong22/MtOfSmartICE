@@ -1,20 +1,28 @@
 """
 Supabase Database Manager for Meituan Crawler
-v1.1 - Updated to use anon key by default (no service role needed)
+v1.5 - Optimized save_business_summary with batch upsert (single HTTP request)
+     - Previous: 2 HTTP requests per record (GET check + POST/PATCH)
+     - Now: 1 HTTP request for ALL records using upsert with on_conflict
+v1.4 - Changed mt_business_summary column names to Chinese
 
 Key Features:
 - Uploads equity package sales data to Supabase
-- Gracefully handles unknown org_codes (logs warning, skips record, continues)
+- Uploads business summary data (综合营业统计) to Supabase
+- Gracefully handles unknown stores (logs warning, skips record, continues)
 - Error isolation: one failed record won't affect others
 - Conditional update: only updates if new values are higher
 - Uses anon key by default - no service role key required
+
+Mapping Strategy:
+- equity_package_sales: uses org_code (MD00007) → master_restaurant.meituan_org_code
+- business_summary: uses store_name → MEITUAN_STORE_NAME_MAP → master_restaurant.restaurant_name
 
 Usage:
     from database.supabase_manager import SupabaseManager
 
     manager = SupabaseManager()
     stats = manager.save_equity_package_sales(records)
-    # stats = {"inserted": N, "updated": N, "skipped": N, "unknown_stores": [...]}
+    stats = manager.save_business_summary(records)
 """
 
 import os
@@ -29,6 +37,21 @@ from src.config import SUPABASE_URL as DEFAULT_URL, SUPABASE_KEY as DEFAULT_KEY
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Explicit store name mapping: Meituan report name → Supabase restaurant_name
+# This is similar to how org_code maps to master_restaurant.meituan_org_code
+# Add new mappings here when new stores appear in Meituan reports
+MEITUAN_STORE_NAME_MAP = {
+    # 宁桂杏 stores
+    "宁桂杏山野烤肉（绵阳1958店）": "宁桂杏1958店",
+    "宁桂杏山野烤肉（上马店）": "宁桂杏上马店",
+    "宁桂杏山野烤肉（常熟世贸店）": "宁桂杏世贸店",
+    "宁桂杏山野烤肉（江油首店）": "宁桂杏江油店",
+    # 野百灵 stores
+    "野百灵·贵州酸汤火锅（1958店）": "野百灵1958店",
+    "野百灵·贵州酸汤（绵阳上马店）": "野百灵上马店",
+    "野百灵·贵州酸汤火锅（德阳店）": "野百灵同森店",  # 德阳店 = 同森店
+}
 
 
 class SupabaseManager:
@@ -58,32 +81,46 @@ class SupabaseManager:
 
         # Cache for org_code -> restaurant_id mappings
         self._restaurant_cache: Dict[str, str] = {}
+        # Cache for restaurant_name -> restaurant_id mappings (for business_summary)
+        self._restaurant_name_cache: Dict[str, str] = {}
         self._cache_loaded = False
 
     def _load_restaurant_cache(self) -> None:
         """
-        Load restaurant mappings (meituan_org_code -> restaurant_id) into cache.
+        Load restaurant mappings into cache.
+        - meituan_org_code -> restaurant_id (for equity_package_sales)
+        - restaurant_name -> restaurant_id (for business_summary)
         Called once on first use to minimize API calls.
         """
         if self._cache_loaded:
             return
 
         try:
+            # Load all restaurants (not just those with org_code)
             result = self._client.table('master_restaurant').select(
                 'id, meituan_org_code, restaurant_name'
-            ).not_.is_('meituan_org_code', 'null').execute()
+            ).execute()
 
             for row in result.data:
-                org_code = row['meituan_org_code']
                 restaurant_id = row['id']
-                self._restaurant_cache[org_code] = restaurant_id
-                logger.debug(
-                    f"Cached mapping: {org_code} -> {restaurant_id} "
-                    f"({row.get('restaurant_name', 'unknown')})"
-                )
+                restaurant_name = row.get('restaurant_name', '')
+                org_code = row.get('meituan_org_code')
+
+                # Cache by org_code if available
+                if org_code:
+                    self._restaurant_cache[org_code] = restaurant_id
+                    logger.debug(f"Cached org_code: {org_code} -> {restaurant_id[:8]}...")
+
+                # Cache by restaurant_name (for business_summary lookups)
+                if restaurant_name:
+                    self._restaurant_name_cache[restaurant_name] = restaurant_id
+                    logger.debug(f"Cached name: {restaurant_name} -> {restaurant_id[:8]}...")
 
             self._cache_loaded = True
-            logger.info(f"Loaded {len(self._restaurant_cache)} restaurant mappings from Supabase")
+            logger.info(
+                f"Loaded {len(self._restaurant_cache)} org_code mappings, "
+                f"{len(self._restaurant_name_cache)} name mappings from Supabase"
+            )
 
         except Exception as e:
             logger.error(f"Failed to load restaurant mappings: {e}")
@@ -100,6 +137,40 @@ class SupabaseManager:
         """
         self._load_restaurant_cache()
         return self._restaurant_cache.get(org_code)
+
+    def get_restaurant_id_by_name(self, store_name: str) -> Optional[str]:
+        """
+        Get restaurant UUID by store name.
+
+        Matching strategy (in order):
+        1. Explicit mapping via MEITUAN_STORE_NAME_MAP (preferred, like org_code mapping)
+        2. Exact match with master_restaurant.restaurant_name
+        3. Fuzzy match as fallback
+
+        Args:
+            store_name: Store name from Meituan report (e.g., "宁桂杏山野烤肉（常熟世贸店）")
+
+        Returns:
+            Restaurant UUID if found, None otherwise
+        """
+        self._load_restaurant_cache()
+
+        # Step 1: Try explicit mapping first (like org_code → restaurant_id)
+        if store_name in MEITUAN_STORE_NAME_MAP:
+            mapped_name = MEITUAN_STORE_NAME_MAP[store_name]
+            if mapped_name in self._restaurant_name_cache:
+                return self._restaurant_name_cache[mapped_name]
+
+        # Step 2: Try exact match with restaurant_name in cache
+        if store_name in self._restaurant_name_cache:
+            return self._restaurant_name_cache[store_name]
+
+        # Step 3: Fuzzy match as fallback (for any unmapped stores)
+        for cached_name, restaurant_id in self._restaurant_name_cache.items():
+            if cached_name in store_name or store_name in cached_name:
+                return restaurant_id
+
+        return None
 
     def save_equity_package_sales(
         self,
@@ -323,6 +394,259 @@ class SupabaseManager:
 
         self._client.table('mt_equity_package_sales').update(data).eq('id', record_id).execute()
 
+    # ==================== Business Summary Methods ====================
+
+    def save_business_summary(
+        self,
+        records: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Save business summary records (综合营业统计) to Supabase using batch upsert.
+
+        v1.5 OPTIMIZATION: Single HTTP request for ALL records using upsert()
+        - Previous: 2 HTTP requests per record (GET + POST/PATCH) = 1040 requests for 520 records
+        - Now: 1 HTTP request total using upsert with on_conflict
+
+        Uses store_name to look up restaurant_id (fuzzy match supported).
+        Implements error isolation - unknown stores are skipped gracefully.
+
+        Args:
+            records: List of record dictionaries from BusinessSummaryCrawler
+
+        Returns:
+            Dictionary with stats: inserted, updated, skipped, failed, unknown_stores
+        """
+        import json
+
+        stats = {
+            "inserted": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "unknown_stores": []
+        }
+
+        if not records:
+            logger.warning("No business summary records to save")
+            return stats
+
+        # Pre-load restaurant mappings (1 HTTP request)
+        self._load_restaurant_cache()
+
+        # Track unique unknown stores
+        seen_unknown = set()
+
+        # Phase 1: Transform all records to Supabase format
+        valid_records = []
+        for record in records:
+            store_name = record.get('store_name', '')
+            business_date = record.get('business_date', '')
+
+            if not store_name or not business_date:
+                logger.warning(f"Missing store_name or business_date: {record}")
+                stats["skipped"] += 1
+                continue
+
+            # Get restaurant_id by name
+            restaurant_id = self.get_restaurant_id_by_name(store_name)
+
+            if not restaurant_id:
+                # Unknown store - log warning but continue
+                if store_name not in seen_unknown:
+                    logger.warning(
+                        f"未知门店 (Unknown store): {store_name}. "
+                        f"跳过该记录，继续处理其他门店。"
+                    )
+                    stats["unknown_stores"].append({"store_name": store_name})
+                    seen_unknown.add(store_name)
+                stats["skipped"] += 1
+                continue
+
+            # Transform to Supabase format with Chinese column names
+            supabase_record = {
+                'restaurant_id': restaurant_id,
+                '营业日期': business_date,
+                '城市': record.get('city'),
+                '门店创建时间': record.get('store_created_at'),
+                '营业天数': record.get('operating_days'),
+                '营业额': record.get('revenue'),
+                '折扣金额': record.get('discount_amount'),
+                '营业收入': record.get('business_income'),
+                '订单数': record.get('order_count'),
+                '就餐人数': record.get('diner_count'),
+                '开台数': record.get('table_count'),
+                '折前人均': record.get('per_capita_before_discount'),
+                '折后人均': record.get('per_capita_after_discount'),
+                '折前单均': record.get('avg_order_before_discount'),
+                '折后单均': record.get('avg_order_after_discount'),
+                '开台率': record.get('table_opening_rate'),
+                '翻台率': record.get('table_turnover_rate'),
+                '上座率': record.get('occupancy_rate'),
+                '平均用餐时长': record.get('avg_dining_time'),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            # Handle composition_data (JSON)
+            composition = record.get('composition_data')
+            if composition:
+                if isinstance(composition, str):
+                    supabase_record['构成数据'] = json.loads(composition)
+                else:
+                    supabase_record['构成数据'] = composition
+
+            valid_records.append(supabase_record)
+
+        # Phase 2: Batch upsert all valid records
+        # Reduced to 100 to avoid network timeout errors on large batches
+        BATCH_SIZE = 100
+        if valid_records:
+            total_batches = (len(valid_records) + BATCH_SIZE - 1) // BATCH_SIZE
+            logger.info(f"Batch upserting {len(valid_records)} records in {total_batches} batch(es)...")
+
+            for i in range(0, len(valid_records), BATCH_SIZE):
+                batch = valid_records[i:i + BATCH_SIZE]
+                batch_num = (i // BATCH_SIZE) + 1
+
+                try:
+                    # Use upsert with on_conflict for unique constraint (restaurant_id, 营业日期)
+                    result = self._client.table('mt_business_summary').upsert(
+                        batch,
+                        on_conflict='restaurant_id,营业日期'
+                    ).execute()
+
+                    # Supabase upsert doesn't distinguish insert vs update in response
+                    stats["updated"] += len(batch)
+                    logger.info(f"Batch {batch_num}/{total_batches}: {len(batch)} records processed")
+
+                except Exception as e:
+                    logger.error(f"Batch {batch_num}/{total_batches} failed: {e}")
+                    stats["failed"] += len(batch)
+
+        # Log summary
+        total = sum([stats["inserted"], stats["updated"], stats["skipped"], stats["failed"]])
+        logger.info(
+            f"Supabase business_summary: {total} 条 - "
+            f"插入/更新:{stats['updated']} "
+            f"跳过:{stats['skipped']} 失败:{stats['failed']}"
+        )
+
+        if stats["unknown_stores"]:
+            logger.warning(
+                f"发现 {len(stats['unknown_stores'])} 个未知门店: "
+                f"{[s['store_name'] for s in stats['unknown_stores']]}"
+            )
+
+        return stats
+
+    def _get_existing_business_summary(
+        self,
+        restaurant_id: str,
+        business_date: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get existing business summary record (using Chinese column name).
+        NOTE: Deprecated in v1.5 - batch upsert handles existence check automatically.
+        Kept for backwards compatibility.
+        """
+        try:
+            result = self._client.table('mt_business_summary').select(
+                'id'
+            ).eq(
+                'restaurant_id', restaurant_id
+            ).eq(
+                '营业日期', business_date
+            ).execute()
+
+            if result.data:
+                return result.data[0]
+            return None
+
+        except Exception as e:
+            logger.error(f"查询现有记录失败: {e}")
+            return None
+
+    def _insert_business_summary(self, restaurant_id: str, record: Dict[str, Any]) -> None:
+        """
+        Insert a new business summary record (using Chinese column names).
+        NOTE: Deprecated in v1.5 - use save_business_summary() with batch upsert instead.
+        Kept for backwards compatibility.
+        """
+        import json
+
+        data = {
+            'restaurant_id': restaurant_id,
+            '营业日期': record.get('business_date'),
+            '城市': record.get('city'),
+            '门店创建时间': record.get('store_created_at'),
+            '营业天数': record.get('operating_days'),
+            '营业额': record.get('revenue'),
+            '折扣金额': record.get('discount_amount'),
+            '营业收入': record.get('business_income'),
+            '订单数': record.get('order_count'),
+            '就餐人数': record.get('diner_count'),
+            '开台数': record.get('table_count'),
+            '折前人均': record.get('per_capita_before_discount'),
+            '折后人均': record.get('per_capita_after_discount'),
+            '折前单均': record.get('avg_order_before_discount'),
+            '折后单均': record.get('avg_order_after_discount'),
+            '开台率': record.get('table_opening_rate'),
+            '翻台率': record.get('table_turnover_rate'),
+            '上座率': record.get('occupancy_rate'),
+            '平均用餐时长': record.get('avg_dining_time'),
+        }
+
+        # Handle composition_data (already JSON string from crawler)
+        composition = record.get('composition_data')
+        if composition:
+            # Parse and re-serialize to ensure valid JSON for Supabase JSONB
+            if isinstance(composition, str):
+                data['构成数据'] = json.loads(composition)
+            else:
+                data['构成数据'] = composition
+
+        self._client.table('mt_business_summary').insert(data).execute()
+
+    def _update_business_summary(self, record_id: str, record: Dict[str, Any]) -> None:
+        """
+        Update an existing business summary record (using Chinese column names).
+        NOTE: Deprecated in v1.5 - use save_business_summary() with batch upsert instead.
+        Kept for backwards compatibility.
+        """
+        import json
+
+        data = {
+            '城市': record.get('city'),
+            '门店创建时间': record.get('store_created_at'),
+            '营业天数': record.get('operating_days'),
+            '营业额': record.get('revenue'),
+            '折扣金额': record.get('discount_amount'),
+            '营业收入': record.get('business_income'),
+            '订单数': record.get('order_count'),
+            '就餐人数': record.get('diner_count'),
+            '开台数': record.get('table_count'),
+            '折前人均': record.get('per_capita_before_discount'),
+            '折后人均': record.get('per_capita_after_discount'),
+            '折前单均': record.get('avg_order_before_discount'),
+            '折后单均': record.get('avg_order_after_discount'),
+            '开台率': record.get('table_opening_rate'),
+            '翻台率': record.get('table_turnover_rate'),
+            '上座率': record.get('occupancy_rate'),
+            '平均用餐时长': record.get('avg_dining_time'),
+            'updated_at': datetime.utcnow().isoformat()
+        }
+
+        # Handle composition_data
+        composition = record.get('composition_data')
+        if composition:
+            if isinstance(composition, str):
+                data['构成数据'] = json.loads(composition)
+            else:
+                data['构成数据'] = composition
+
+        self._client.table('mt_business_summary').update(data).eq('id', record_id).execute()
+
+    # ==================== Equity Sales Query Methods ====================
+
     def get_equity_sales(
         self,
         org_code: Optional[str] = None,
@@ -420,8 +744,12 @@ class SupabaseManager:
         """Force refresh of restaurant mappings cache."""
         self._cache_loaded = False
         self._restaurant_cache.clear()
+        self._restaurant_name_cache.clear()
         self._load_restaurant_cache()
-        logger.info(f"Restaurant cache refreshed: {len(self._restaurant_cache)} mappings")
+        logger.info(
+            f"Restaurant cache refreshed: {len(self._restaurant_cache)} org_code, "
+            f"{len(self._restaurant_name_cache)} name mappings"
+        )
 
 
 # Example usage

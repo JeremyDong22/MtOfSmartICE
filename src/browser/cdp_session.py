@@ -1,5 +1,6 @@
 """
 CDP Session Manager - Simplified browser connection using CDP only
+v1.1 - Added find_page_by_url() to locate correct page by URL pattern
 
 This module provides a simple wrapper around Playwright's CDP connection
 for connecting to an existing Chrome instance.
@@ -65,9 +66,13 @@ class CDPSession:
             logger.error(f"Failed to connect to Chrome via CDP: {e}")
             raise RuntimeError(f"CDP connection failed: {e}")
 
-    async def get_page(self) -> Page:
+    async def get_page(self, url_pattern: str = None) -> Page:
         """
-        Get the current page or create a new one.
+        Get a page, optionally matching a URL pattern.
+
+        Args:
+            url_pattern: Optional URL substring to match. If provided, finds the
+                        first page whose URL contains this pattern.
 
         Returns:
             Page: The browser page
@@ -79,6 +84,17 @@ class CDPSession:
             raise RuntimeError("Not connected. Call connect() first.")
 
         if self.context.pages:
+            # If URL pattern provided, find matching page
+            if url_pattern:
+                for page in self.context.pages:
+                    if url_pattern in page.url:
+                        logger.info(f"Found page matching '{url_pattern}': {page.url}")
+                        return page
+                # If no match found, log available pages and return first
+                logger.warning(f"No page matching '{url_pattern}'. Available pages:")
+                for i, p in enumerate(self.context.pages):
+                    logger.warning(f"  [{i}] {p.url}")
+
             page = self.context.pages[0]
             logger.debug(f"Using existing page: {page.url}")
             return page

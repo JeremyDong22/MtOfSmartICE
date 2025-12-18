@@ -1,5 +1,5 @@
 # Database Schema
-<!-- v1.0 - 2025-12-17 -->
+<!-- v1.2 - 2025-12-18 - Changed Supabase mt_business_summary column names to Chinese -->
 
 本文档描述美团爬虫项目的数据库结构，包括本地 SQLite 和云端 Supabase。
 
@@ -38,6 +38,37 @@
 - `idx_equity_sales_org_date`: (org_code, date)
 - `idx_equity_sales_date`: (date)
 
+### mt_business_summary
+综合营业统计数据表（来自报表中心→营业报表→综合营业统计）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 自增主键 |
+| store_name | TEXT | 门店名称 |
+| business_date | TEXT | 营业日期 (YYYY-MM-DD) |
+| city | TEXT | 城市 |
+| store_created_at | TEXT | 门店创建时间 |
+| operating_days | INTEGER | 营业天数 |
+| revenue | REAL | 营业额 |
+| discount_amount | REAL | 折扣金额 |
+| business_income | REAL | 营业收入 |
+| order_count | INTEGER | 订单数 |
+| diner_count | INTEGER | 就餐人数 |
+| table_count | INTEGER | 开台数 |
+| per_capita_before_discount | REAL | 折前人均 |
+| per_capita_after_discount | REAL | 折后人均 |
+| avg_order_before_discount | REAL | 折前单均 |
+| avg_order_after_discount | REAL | 折后单均 |
+| table_opening_rate | TEXT | 开台率 |
+| table_turnover_rate | REAL | 翻台率 |
+| occupancy_rate | TEXT | 上座率 |
+| avg_dining_time | INTEGER | 平均用餐时长(分钟) |
+| composition_data | TEXT | 渠道/收入/支付构成(JSON) |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+**唯一约束**: `(store_name, business_date)`
+
 ---
 
 ## 云端 Supabase
@@ -70,6 +101,41 @@
 | updated_at | TIMESTAMPTZ | 更新时间 |
 
 **唯一约束**: `(restaurant_id, date, package_name)`
+
+### mt_business_summary
+综合营业统计数据表（云端版本，使用中文列名）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 主键 |
+| restaurant_id | UUID | 外键 → master_restaurant.id |
+| 营业日期 | DATE | 营业日期 |
+| 城市 | TEXT | 城市 |
+| 门店创建时间 | TEXT | 门店创建时间 |
+| 营业天数 | INTEGER | 营业天数 |
+| 营业额 | NUMERIC | 营业额 |
+| 折扣金额 | NUMERIC | 折扣金额 |
+| 营业收入 | NUMERIC | 营业收入 |
+| 订单数 | INTEGER | 订单数 |
+| 就餐人数 | INTEGER | 就餐人数 |
+| 开台数 | INTEGER | 开台数 |
+| 折前人均 | NUMERIC | 折前人均 |
+| 折后人均 | NUMERIC | 折后人均 |
+| 折前单均 | NUMERIC | 折前单均 |
+| 折后单均 | NUMERIC | 折后单均 |
+| 开台率 | TEXT | 开台率 |
+| 翻台率 | NUMERIC | 翻台率 |
+| 上座率 | TEXT | 上座率 |
+| 平均用餐时长 | INTEGER | 平均用餐时长(分钟) |
+| 构成数据 | JSONB | 渠道/收入/支付构成 |
+| created_at | TIMESTAMPTZ | 创建时间 |
+| updated_at | TIMESTAMPTZ | 更新时间 |
+
+**唯一约束**: `(restaurant_id, 营业日期)`
+
+**索引**:
+- `idx_business_summary_restaurant_date`: (restaurant_id, 营业日期)
+- `idx_business_summary_date`: (营业日期)
 
 ---
 

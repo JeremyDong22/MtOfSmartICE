@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Meituan Merchant Backend Crawler - automated daily crawler for Meituan merchant backend 权益包售卖汇总表 (Equity Package Sales). Uses CDP-only browser connection and 集团账号 (group account) for aggregated data across all stores.
+Multi-Site Merchant Backend Crawler - automated daily crawler for:
+- **美团管家** (pos.meituan.com):
+  - 权益包售卖汇总表 (equity_package_sales) - Package sales by store/date
+  - 综合营业统计 (business_summary) - Revenue, orders, payment composition
+- **大众点评** (e.dianping.com): [skeleton ready, crawlers pending]
+
+Uses CDP-only browser connection and 集团账号 (group account) for aggregated data across all stores.
 
 ## Common Commands
 
@@ -24,16 +30,19 @@ python src/main.py
 
 ### Run Crawler
 ```bash
-# Daily crawl (yesterday's data, all stores via 集团 account)
+# 美团管家 - 权益包售卖汇总表 (default)
 python src/main.py
 
-# Specific date
+# 美团管家 - 综合营业统计
+python src/main.py --site guanjia --report business_summary
+
+# Specific date (default: yesterday)
 python src/main.py --date 2025-12-13
 
-# Date range
+# Date range (3 days back)
 python src/main.py --date 2025-12-09 --end-date 2025-12-15
 
-# Force re-crawl (ignore existing data)
+# Force re-crawl (update existing records even if values unchanged)
 python src/main.py --force
 
 # Skip navigation (for debugging, assumes page is already configured)
@@ -46,13 +55,19 @@ python src/main.py --cdp http://localhost:9223
 python src/main.py --no-supabase
 ```
 
+### Default Values
+- `--site`: guanjia (美团管家)
+- `--report`: equity_package_sales (权益包售卖汇总表)
+- `--date`: yesterday (calculated at runtime)
+- `--end-date`: same as start date (single day)
+
 ### Database Queries
 ```bash
-sqlite3 data/meituan.db
+sqlite3 database/meituan_data.db
 
 # View recent equity package sales
-SELECT org_code, store_name, date, package_name, quantity_sold, total_sales
-FROM equity_package_sales
+SELECT org_code, date, package_name, quantity_sold, total_sales
+FROM mt_equity_package_sales
 ORDER BY date DESC LIMIT 20;
 ```
 
@@ -62,8 +77,21 @@ tail -f logs/crawler_$(date +%Y%m%d).log
 ```
 
 ### Linux Deployment (Cron)
+
+**Run both crawlers daily at midnight, crawling 3 days back until yesterday:**
+
 ```bash
-# Auto-setup cron job (daily at midnight)
+# Manual cron setup - add to crontab -e
+# Runs at 00:00 daily, crawls 3 days back (e.g., Dec 15-17 if today is Dec 18)
+
+0 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report equity_package_sales --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
+
+5 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report business_summary --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
+```
+
+**Or use the setup script:**
+```bash
+# Auto-setup cron job
 ./scripts/setup_cron.sh
 
 # Verify cron is set
@@ -73,7 +101,42 @@ crontab -l
 tail -f /tmp/meituan-crawler.log
 ```
 
+**Important for cron:**
+- Chrome must be running with CDP enabled (port 9222)
+- User must be logged into 美团管家 in the Chrome session
+- Consider running Chrome in a tmux/screen session for persistence
+
 ## Architecture
+
+Three-layer architecture separating browser connection, site navigation, and data extraction:
+
+```
+src/
+├── main.py                           # Unified entry point (--site, --report)
+│
+├── browser/                          # Layer 1: Browser Connection
+│   ├── cdp_launcher.py               # CDP detect + launch Chrome
+│   └── cdp_session.py                # CDP session management
+│
+├── sites/                            # Layer 2: Site Navigation
+│   ├── base_site.py                  # Abstract base class
+│   ├── meituan_guanjia.py            # 美团管家 (pos.meituan.com)
+│   └── dianping.py                   # 大众点评 (e.dianping.com)
+│
+├── crawlers/                         # Layer 3: Data Extraction
+│   ├── base_crawler.py               # Abstract base class
+│   ├── guanjia/                      # 美团管家 crawlers
+│   │   ├── equity_package_sales.py   # 权益包售卖汇总表
+│   │   └── business_summary.py       # 综合营业统计
+│   └── dianping/                     # 大众点评 crawlers
+│       └── (pending)
+│
+└── database/
+    ├── db_manager.py                 # Local SQLite
+    └── supabase_manager.py           # Cloud Supabase
+```
+
+### Data Flow
 
 ```
 main.py
@@ -84,45 +147,77 @@ main.py
   CDPSession (browser/cdp_session.py)
     └─ Connect to Chrome via CDP endpoint
   ↓
-  EquityPackageSalesCrawler (crawlers/权益包售卖汇总表.py)
-    ├─ Inherits from BaseCrawler
-    ├─ Select 集团 account from selectorg page
-    ├─ Navigate to 营销中心 → 数据报表 → 权益包售卖汇总表
-    ├─ Configure filters (门店/日期 checkboxes, date range)
+  Site (sites/meituan_guanjia.py or sites/dianping.py)
+    ├─ Login detection
+    ├─ Account selection (集团账号)
+    └─ Navigate to report page
+  ↓
+  Crawler (crawlers/guanjia/equity_package_sales.py)
+    ├─ Configure filters (checkboxes, date range)
     ├─ Extract all pages of data
     └─ Save to databases
   ↓
-  DatabaseManager (database/db_manager.py)        ← Local SQLite
-    └─ Save to SQLite (UPSERT with conditional update)
-  ↓
-  SupabaseManager (database/supabase_manager.py)  ← Cloud Supabase
-    ├─ Map org_code → restaurant_id via master_restaurant
-    ├─ Upload to Supabase (error isolation per record)
-    └─ Unknown stores logged but don't block others
+  DatabaseManager → SQLite (local)
+  SupabaseManager → Supabase (cloud)
 ```
 
 ### Key Design Patterns
 
+- **Three-layer separation**: Browser → Sites → Crawlers (easy to add new sites)
 - **CDP-only connection**: No `browser.launch()` - connects to existing Chrome with `--remote-debugging-port=9222`
-- **Group account (集团账号)**: Single crawl extracts data for all stores, no per-store switching needed
-- **Abstract base class**: Crawlers inherit from `BaseCrawler` which provides popup dismissal, iframe handling, result formatting
+- **Group account (集团账号)**: Single crawl extracts data for all stores
+- **Abstract base classes**: `BaseSite` and `BaseCrawler` provide common functionality
 - **Conditional duplicate handling**: Only updates existing records if new values are higher
 - **Dual database storage**: SQLite (local backup) + Supabase (cloud sync)
 - **Error isolation**: Supabase upload failures for one store don't block other stores
 
+### Adding New Sites
+
+1. Create site class in `src/sites/`:
+```python
+from src.sites.base_site import BaseSite
+
+class NewSite(BaseSite):
+    SITE_NAME = "新网站"
+    BASE_URL = "https://example.com"
+
+    async def is_logged_in(self) -> bool:
+        # Check login status
+        pass
+
+    async def navigate_to_report(self, report_name: str) -> bool:
+        # Navigate to specific report page
+        pass
+```
+
+2. Register in `src/main.py` SITES dict:
+```python
+SITES = {
+    "newsite": {
+        "class": NewSite,
+        "name": "新网站",
+        "startup_url": "https://example.com",
+        "reports": {
+            "report_name": NewCrawler
+        }
+    }
+}
+```
+
 ### Adding New Crawlers
 
-1. Create class inheriting from `BaseCrawler` in `src/crawlers/`:
+1. Create crawler class in `src/crawlers/{site_name}/`:
 ```python
 from src.crawlers.base_crawler import BaseCrawler
 
 class NewCrawler(BaseCrawler):
     async def crawl(self, store_id: str = None, store_name: str = None) -> Dict[str, Any]:
-        # Navigate, extract, save
+        # Configure filters, extract data, save
         return self.create_result(True, store_id or "GROUP", store_name or "集团", data=data)
 ```
 
-2. Update `main.py` to instantiate and run the new crawler
+2. Register in site's REPORTS dict and `main.py` SITES
+
 3. Add database tables in `db_manager.py` if needed
 
 ## Configuration
@@ -131,8 +226,7 @@ All settings in `src/config.py`:
 - `CDP_URL`: Chrome DevTools Protocol endpoint (default: `http://localhost:9222`)
 - `DB_PATH`: Database path
 - `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_KEY`: Supabase anon key (embedded, no env var needed)
-- `MEITUAN_*_URL`: Target URLs
+- `SUPABASE_KEY`: Supabase anon key
 - `DEFAULT_TIMEOUT`: Timeout configuration
 
 ## Database Schema
@@ -140,8 +234,14 @@ All settings in `src/config.py`:
 详细 schema 和门店映射表见 [database/SCHEMA.md](database/SCHEMA.md)。
 
 **快速参考**:
-- **Local SQLite** (`database/meituan_data.db`): `mt_stores`, `mt_equity_package_sales`
-- **Cloud Supabase**: `master_restaurant`, `mt_equity_package_sales`
+- **Local SQLite** (`database/meituan_data.db`):
+  - `mt_stores` - Store info
+  - `mt_equity_package_sales` - Package sales data
+  - `mt_business_summary` - Daily revenue/composition data (JSON for nested columns)
+- **Cloud Supabase**:
+  - `master_restaurant` - Store master data with mappings
+  - `mt_equity_package_sales` - Package sales
+  - `mt_business_summary` - Business summary with composition_data JSON
 - **映射关系**: org_code (美团) ↔ restaurant_id (Supabase)
 
 ## Important Notes

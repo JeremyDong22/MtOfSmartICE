@@ -1,16 +1,15 @@
 """
-Database Manager for Meituan Crawler - Simplified version for equity package sales
-v2.1 - Added conditional duplicate handling: only updates if new values are higher
-       Added updated_at column to track when records change
-       Compatible with both SQLite and PostgreSQL (Supabase)
+Database Manager for Meituan Crawler
+v2.2 - Added mt_business_summary table for 综合营业统计 report
 
 Tables:
 - mt_stores: Store information with org_code as primary key
 - mt_equity_package_sales: Equity package sales data linked to stores
+- mt_business_summary: Comprehensive business statistics by store/date
 
 Duplicate Handling Logic:
-- If record exists for (org_code, date, package_name), compare values
-- Only update if new quantity_sold > existing OR new total_sales > existing
+- If record exists for (store_name, business_date), compare values
+- Only update if new revenue > existing OR new order_count > existing
 - This handles mid-day vs end-of-day data collection scenarios
 """
 
@@ -107,6 +106,46 @@ class DatabaseManager:
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_equity_sales_date
                     ON mt_equity_package_sales(date)
+                """)
+
+                # Create business summary table for 综合营业统计
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS mt_business_summary (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        city TEXT,
+                        store_name TEXT NOT NULL,
+                        business_date TEXT NOT NULL,
+                        store_created_at TEXT,
+                        operating_days INTEGER,
+                        revenue REAL,
+                        discount_amount REAL,
+                        business_income REAL,
+                        order_count INTEGER,
+                        diner_count INTEGER,
+                        table_count INTEGER,
+                        per_capita_before_discount REAL,
+                        per_capita_after_discount REAL,
+                        avg_order_before_discount REAL,
+                        avg_order_after_discount REAL,
+                        table_opening_rate TEXT,
+                        table_turnover_rate REAL,
+                        occupancy_rate TEXT,
+                        avg_dining_time INTEGER,
+                        composition_data TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(store_name, business_date)
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_business_summary_store_date
+                    ON mt_business_summary(store_name, business_date)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_business_summary_date
+                    ON mt_business_summary(business_date)
                 """)
 
                 conn.commit()
@@ -334,6 +373,164 @@ class DatabaseManager:
 
         except sqlite3.Error as e:
             logger.error(f"Error saving equity package sales: {e}")
+            return stats
+
+    # ==================== Business Summary Operations ====================
+
+    def save_business_summary(
+        self, records: List[Dict[str, Any]], force_update: bool = False
+    ) -> Dict[str, int]:
+        """
+        Save business summary records with conditional duplicate handling.
+        Updates existing records if new values are higher OR if force_update=True.
+
+        Args:
+            records: List of record dictionaries with keys:
+                - city, store_name, business_date, store_created_at
+                - operating_days, revenue, discount_amount, business_income
+                - order_count, diner_count, table_count
+                - per_capita_before_discount, per_capita_after_discount
+                - avg_order_before_discount, avg_order_after_discount
+                - table_opening_rate, table_turnover_rate, occupancy_rate
+                - avg_dining_time, composition_data (JSON string)
+            force_update: If True, always update existing records (useful for fixing JSON)
+
+        Returns:
+            Dictionary with counts: {"inserted": N, "updated": N, "skipped": N}
+        """
+        stats = {"inserted": 0, "updated": 0, "skipped": 0}
+
+        if not records:
+            logger.warning("No business summary records to save")
+            return stats
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                for record in records:
+                    store_name = record.get('store_name', '')
+                    business_date = record.get('business_date', '')
+                    new_revenue = record.get('revenue', 0) or 0
+                    new_order_count = record.get('order_count', 0) or 0
+
+                    if not store_name or not business_date:
+                        logger.warning(f"Skipping record with missing store_name or business_date")
+                        stats["skipped"] += 1
+                        continue
+
+                    # Check if record exists
+                    cursor.execute("""
+                        SELECT id, revenue, order_count
+                        FROM mt_business_summary
+                        WHERE store_name = ? AND business_date = ?
+                    """, (store_name, business_date))
+
+                    existing = cursor.fetchone()
+
+                    if existing is None:
+                        # INSERT new record
+                        cursor.execute("""
+                            INSERT INTO mt_business_summary
+                            (city, store_name, business_date, store_created_at, operating_days,
+                             revenue, discount_amount, business_income, order_count, diner_count,
+                             table_count, per_capita_before_discount, per_capita_after_discount,
+                             avg_order_before_discount, avg_order_after_discount,
+                             table_opening_rate, table_turnover_rate, occupancy_rate,
+                             avg_dining_time, composition_data, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """, (
+                            record.get('city', ''),
+                            store_name,
+                            business_date,
+                            record.get('store_created_at', ''),
+                            record.get('operating_days', 0),
+                            new_revenue,
+                            record.get('discount_amount', 0),
+                            record.get('business_income', 0),
+                            new_order_count,
+                            record.get('diner_count', 0),
+                            record.get('table_count', 0),
+                            record.get('per_capita_before_discount', 0),
+                            record.get('per_capita_after_discount', 0),
+                            record.get('avg_order_before_discount', 0),
+                            record.get('avg_order_after_discount', 0),
+                            record.get('table_opening_rate', ''),
+                            record.get('table_turnover_rate', 0),
+                            record.get('occupancy_rate', ''),
+                            record.get('avg_dining_time', 0),
+                            record.get('composition_data', '{}')
+                        ))
+                        stats["inserted"] += 1
+                        logger.debug(f"INSERT: {store_name}/{business_date}")
+
+                    else:
+                        # Check if new values are higher OR force_update is True
+                        old_revenue = existing['revenue'] or 0
+                        old_order_count = existing['order_count'] or 0
+
+                        # Always update to ensure composition_data JSON is refreshed
+                        should_update = (
+                            new_revenue > old_revenue or
+                            new_order_count > old_order_count or
+                            force_update
+                        )
+
+                        if should_update:
+                            # UPDATE record
+                            cursor.execute("""
+                                UPDATE mt_business_summary
+                                SET city = ?, store_created_at = ?, operating_days = ?,
+                                    revenue = ?, discount_amount = ?, business_income = ?,
+                                    order_count = ?, diner_count = ?, table_count = ?,
+                                    per_capita_before_discount = ?, per_capita_after_discount = ?,
+                                    avg_order_before_discount = ?, avg_order_after_discount = ?,
+                                    table_opening_rate = ?, table_turnover_rate = ?, occupancy_rate = ?,
+                                    avg_dining_time = ?, composition_data = ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (
+                                record.get('city', ''),
+                                record.get('store_created_at', ''),
+                                record.get('operating_days', 0),
+                                new_revenue,
+                                record.get('discount_amount', 0),
+                                record.get('business_income', 0),
+                                new_order_count,
+                                record.get('diner_count', 0),
+                                record.get('table_count', 0),
+                                record.get('per_capita_before_discount', 0),
+                                record.get('per_capita_after_discount', 0),
+                                record.get('avg_order_before_discount', 0),
+                                record.get('avg_order_after_discount', 0),
+                                record.get('table_opening_rate', ''),
+                                record.get('table_turnover_rate', 0),
+                                record.get('occupancy_rate', ''),
+                                record.get('avg_dining_time', 0),
+                                record.get('composition_data', '{}'),
+                                existing['id']
+                            ))
+                            stats["updated"] += 1
+                            logger.debug(
+                                f"UPDATE: {store_name}/{business_date} - "
+                                f"revenue: {old_revenue}->{new_revenue}"
+                            )
+                        else:
+                            stats["skipped"] += 1
+                            logger.debug(f"SKIP: {store_name}/{business_date} - existing data is higher")
+
+                conn.commit()
+
+                total = stats["inserted"] + stats["updated"] + stats["skipped"]
+                logger.info(
+                    f"Business summary: {total} records - "
+                    f"{stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped"
+                )
+                return stats
+
+        except sqlite3.Error as e:
+            logger.error(f"Error saving business summary: {e}")
             return stats
 
     def get_equity_sales(
