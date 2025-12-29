@@ -1,5 +1,7 @@
 # Meituan Guanjia Site - Website locator for pos.meituan.com
-# v1.1 - Added business_summary (综合营业统计) report navigation
+# v1.2 - Optimized navigation wait strategy
+#   - Changed wait_until from 'networkidle' to 'domcontentloaded'
+#   - Prevents timeout during peak hours when network activity doesn't stabilize
 #
 # Handles:
 # - Login detection
@@ -75,7 +77,7 @@ class MeituanGuanjiaSite(BaseSite):
 
         # Try navigating to selectorg to check
         try:
-            await self.page.goto(SELECTORG_URL, wait_until='networkidle', timeout=30000)
+            await self.page.goto(SELECTORG_URL, wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(1)
 
             # If redirected to login, not logged in
@@ -99,7 +101,7 @@ class MeituanGuanjiaSite(BaseSite):
         try:
             # Navigate to selectorg page
             logger.info(f"Navigating to selectorg page: {SELECTORG_URL}")
-            await self.page.goto(SELECTORG_URL, wait_until='networkidle', timeout=60000)
+            await self.page.goto(SELECTORG_URL, wait_until='domcontentloaded', timeout=60000)
             await asyncio.sleep(2)
 
             # Find and click the 集团 "选 择" button
@@ -184,7 +186,7 @@ class MeituanGuanjiaSite(BaseSite):
 
             # Step 2: Navigate to report URL
             logger.info(f"Navigating to {report['name']}: {report_url}")
-            await self.page.goto(report_url, wait_until='networkidle', timeout=60000)
+            await self.page.goto(report_url, wait_until='domcontentloaded', timeout=60000)
             await asyncio.sleep(3)
 
             # Dismiss popups

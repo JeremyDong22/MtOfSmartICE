@@ -1,5 +1,7 @@
 # Daily Crawler - Unified entry point for multi-site crawling
-# v3.3 - Support multiple reports in single run (--report all)
+# v3.4 - Add retry mechanism for timeout errors & optimize navigation wait strategy
+#   - Changed wait_until from 'networkidle' to 'domcontentloaded' for faster, more reliable navigation
+#   - Added 3-attempt retry logic for timeout errors (retries entire report from navigation)
 #   - Browser layer: cdp_launcher.py (CDP detect + launch)
 #   - Site layer: sites/ (website navigation)
 #   - Crawler layer: crawlers/ (data extraction)
@@ -174,71 +176,93 @@ async def main():
                 "start_time": datetime.now().isoformat()
             }
 
-            try:
-                # Navigate to report using site layer
-                logger.info(f"Navigating to report: {report_key}")
-                if not args.skip_navigation:
-                    nav_success = await site.navigate_to_report(report_key)
-                    if not nav_success:
-                        results["error"] = "Navigation failed"
-                        all_results.append(results)
-                        continue
-                else:
-                    logger.info("SKIP_NAVIGATION: Using current page state")
+            # Retry mechanism for timeout errors
+            MAX_RETRIES = 3
+            for attempt in range(MAX_RETRIES):
+                if attempt > 0:
+                    logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES} for {report_key}")
 
-                # Get frame from site
-                frame = site.get_frame()
+                try:
+                    # Navigate to report using site layer
+                    logger.info(f"Navigating to report: {report_key}")
+                    if not args.skip_navigation:
+                        nav_success = await site.navigate_to_report(report_key)
+                        if not nav_success:
+                            results["error"] = "Navigation failed"
+                            # Don't retry navigation failures from other causes
+                            break
+                    else:
+                        logger.info("SKIP_NAVIGATION: Using current page state")
 
-                # Initialize and run crawler
-                crawler_class = site_config["reports"][report_key]
-                crawler = crawler_class(
-                    page=page,
-                    frame=frame,
-                    db_manager=db,
-                    target_date=target_date,
-                    end_date=end_date,
-                    skip_navigation=args.skip_navigation,
-                    force_update=args.force
-                )
+                    # Get frame from site
+                    frame = site.get_frame()
 
-                logger.info(f"Running {crawler_class.__name__}...")
-                result = await crawler.crawl()
-
-                if result["success"]:
-                    logger.info("Crawl completed successfully")
-                    record_count = result["data"].get("record_count", 0)
-                    save_stats = result["data"].get("save_stats", {})
-                    results["success"] = True
-                    results["total_records"] = record_count
-                    results["save_stats"] = save_stats
-
-                    logger.info(
-                        f"SQLite: {save_stats.get('inserted', 0)} inserted, "
-                        f"{save_stats.get('updated', 0)} updated, "
-                        f"{save_stats.get('skipped', 0)} skipped"
+                    # Initialize and run crawler
+                    crawler_class = site_config["reports"][report_key]
+                    crawler = crawler_class(
+                        page=page,
+                        frame=frame,
+                        db_manager=db,
+                        target_date=target_date,
+                        end_date=end_date,
+                        skip_navigation=args.skip_navigation,
+                        force_update=args.force
                     )
 
-                    # Upload to Supabase
-                    records = result["data"].get("records", [])
-                    if records and not args.no_supabase:
-                        logger.info("Uploading to Supabase...")
-                        supabase_stats = upload_to_supabase(records, report_key)
-                        results["supabase_stats"] = supabase_stats
+                    logger.info(f"Running {crawler_class.__name__}...")
+                    result = await crawler.crawl()
+
+                    if result["success"]:
+                        logger.info("Crawl completed successfully")
+                        record_count = result["data"].get("record_count", 0)
+                        save_stats = result["data"].get("save_stats", {})
+                        results["success"] = True
+                        results["total_records"] = record_count
+                        results["save_stats"] = save_stats
 
                         logger.info(
-                            f"Supabase: {supabase_stats.get('inserted', 0)} inserted, "
-                            f"{supabase_stats.get('updated', 0)} updated, "
-                            f"{supabase_stats.get('failed', 0)} failed"
+                            f"SQLite: {save_stats.get('inserted', 0)} inserted, "
+                            f"{save_stats.get('updated', 0)} updated, "
+                            f"{save_stats.get('skipped', 0)} skipped"
                         )
-                    elif args.no_supabase:
-                        logger.info("Supabase upload skipped (--no-supabase)")
-                else:
-                    logger.error(f"Crawl failed: {result.get('error')}")
-                    results["error"] = result.get("error")
 
-            except Exception as e:
-                logger.error(f"Error in {report_key}: {e}", exc_info=True)
-                results["error"] = str(e)
+                        # Upload to Supabase
+                        records = result["data"].get("records", [])
+                        if records and not args.no_supabase:
+                            logger.info("Uploading to Supabase...")
+                            supabase_stats = upload_to_supabase(records, report_key)
+                            results["supabase_stats"] = supabase_stats
+
+                            logger.info(
+                                f"Supabase: {supabase_stats.get('inserted', 0)} inserted, "
+                                f"{supabase_stats.get('updated', 0)} updated, "
+                                f"{supabase_stats.get('failed', 0)} failed"
+                            )
+                        elif args.no_supabase:
+                            logger.info("Supabase upload skipped (--no-supabase)")
+
+                        # Success - break retry loop
+                        break
+                    else:
+                        logger.error(f"Crawl failed: {result.get('error')}")
+                        results["error"] = result.get("error")
+                        # Don't retry if crawl logic failed (not a timeout)
+                        break
+
+                except Exception as e:
+                    error_msg = str(e)
+                    is_timeout = "Timeout" in error_msg or "timeout" in error_msg.lower()
+
+                    if is_timeout and attempt < MAX_RETRIES - 1:
+                        logger.warning(f"Timeout error on attempt {attempt + 1}/{MAX_RETRIES}: {e}")
+                        logger.info(f"Retrying {report_key} from the beginning...")
+                        await asyncio.sleep(2)  # Brief pause before retry
+                        continue
+                    else:
+                        # Last attempt or non-timeout error
+                        logger.error(f"Error in {report_key}: {e}", exc_info=True)
+                        results["error"] = error_msg
+                        break
 
             results["end_time"] = datetime.now().isoformat()
             all_results.append(results)
