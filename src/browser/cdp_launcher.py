@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Default configuration
 DEFAULT_CDP_PORT = 9222
-DEFAULT_PROFILE_DIR = "/Users/jeremydong/Desktop/Smartice/APPs/MtOfSmartICE/data/chrome-profile"
+DEFAULT_PROFILE_DIR = str(Path(__file__).parent.parent.parent / "data" / "chrome-profile")
 DEFAULT_STARTUP_URL = "https://pos.meituan.com"
 CDP_CHECK_TIMEOUT = 2.0
 CDP_STARTUP_TIMEOUT = 20.0  # Allow more time for initial page load

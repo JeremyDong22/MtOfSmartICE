@@ -158,6 +158,7 @@ class MeituanGuanjiaSite(BaseSite):
 
         except Exception as e:
             logger.error(f"Error selecting group account: {e}")
+            await self.capture_debug_screenshot("timeout_select_group")
             return False
 
     async def navigate_to_report(self, report_name: str) -> bool:
@@ -211,6 +212,7 @@ class MeituanGuanjiaSite(BaseSite):
 
         except Exception as e:
             logger.error(f"Navigation to {report_name} failed: {e}")
+            await self.capture_debug_screenshot(f"timeout_navigate_{report_name}")
             return False
 
     async def _switch_to_new_version_if_needed(self) -> None:

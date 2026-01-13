@@ -11,6 +11,8 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
+from datetime import datetime
+from pathlib import Path
 from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,8 @@ class BaseSite(ABC):
         """
         self.page = page
         self.frame = None  # Will be set after navigation if iframe is used
+        self.screenshot_dir = Path("screenshots")
+        self.screenshot_dir.mkdir(exist_ok=True)
 
     @abstractmethod
     async def is_logged_in(self) -> bool:
@@ -151,6 +155,27 @@ class BaseSite(ABC):
         except Exception as e:
             logger.warning(f"Navigation timeout: {e}")
             return False
+
+    async def capture_debug_screenshot(self, context: str) -> Optional[str]:
+        """
+        Capture a screenshot for debugging purposes.
+
+        Args:
+            context: Description of what was happening (e.g., "timeout_navigation")
+
+        Returns:
+            Path to saved screenshot or None if failed
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{context}_{timestamp}.png"
+            filepath = self.screenshot_dir / filename
+            await self.page.screenshot(path=str(filepath), full_page=True)
+            logger.info(f"Debug screenshot saved: {filepath}")
+            return str(filepath)
+        except Exception as e:
+            logger.error(f"Failed to capture screenshot: {e}")
+            return None
 
     def __repr__(self) -> str:
         return f"{self.SITE_NAME}(url={self.page.url})"
