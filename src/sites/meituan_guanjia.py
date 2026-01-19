@@ -36,6 +36,12 @@ REPORTS = {
         "iframe_pattern": "dpaas-report",
         "path": ["报表中心", "营业报表", "综合营业统计"]
     },
+    "dish_sales": {
+        "name": "菜品综合统计",
+        "url": "https://pos.meituan.com/web/report/dishSaleAnalysis#/rms-report/dishSaleAnalysis",
+        "iframe_pattern": None,  # Data is on main page, not in iframe
+        "path": ["报表中心", "菜品报表", "菜品综合统计"]
+    },
 }
 
 

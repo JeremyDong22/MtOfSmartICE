@@ -802,6 +802,146 @@ class SupabaseManager:
             f"{len(self._restaurant_name_cache)} name mappings"
         )
 
+    def save_dish_sales(
+        self,
+        records: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Save dish sales records (菜品综合统计) to Supabase using batch upsert.
+
+        Uses store_name to look up restaurant_id (fuzzy match supported).
+        Implements error isolation - unknown stores are skipped gracefully.
+
+        Args:
+            records: List of record dictionaries from DishSalesCrawler
+
+        Returns:
+            Dictionary with stats: inserted, updated, skipped, failed, unknown_stores
+        """
+        stats = {
+            "inserted": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "unknown_stores": []
+        }
+
+        if not records:
+            logger.warning("No dish sales records to save")
+            return stats
+
+        # Pre-load restaurant mappings (1 HTTP request)
+        self._load_restaurant_cache()
+
+        # Track unique unknown stores
+        seen_unknown = set()
+
+        # Phase 1: Transform all records to Supabase format
+        valid_records = []
+        for record in records:
+            store_name = record.get('store_name', '')
+            business_date = record.get('business_date', '')
+            dish_name = record.get('dish_name', '')
+
+            if not store_name or not business_date or not dish_name:
+                logger.warning(f"Missing required fields: {record}")
+                stats["skipped"] += 1
+                continue
+
+            # Get restaurant_id by name
+            restaurant_id = self.get_restaurant_id_by_name(store_name)
+
+            if not restaurant_id:
+                # Unknown store - log warning but continue
+                if store_name not in seen_unknown:
+                    logger.warning(
+                        f"未知门店 (Unknown store): {store_name}. "
+                        f"跳过该记录，继续处理其他门店。"
+                    )
+                    stats["unknown_stores"].append({"store_name": store_name})
+                    seen_unknown.add(store_name)
+                stats["skipped"] += 1
+                continue
+
+            # Transform to Supabase format
+            supabase_record = {
+                'restaurant_id': restaurant_id,
+                'business_date': business_date,
+                'dish_name': dish_name,
+                'org_code': record.get('org_code'),
+                'sales_quantity': record.get('sales_quantity'),
+                'sales_quantity_pct': record.get('sales_quantity_pct'),
+                'price_before_discount': record.get('price_before_discount'),
+                'price_after_discount': record.get('price_after_discount'),
+                'sales_amount': record.get('sales_amount'),
+                'sales_amount_pct': record.get('sales_amount_pct'),
+                'discount_amount': record.get('discount_amount'),
+                'dish_discount_pct': record.get('dish_discount_pct'),
+                'dish_income': record.get('dish_income'),
+                'dish_income_pct': record.get('dish_income_pct'),
+                'order_quantity': record.get('order_quantity'),
+                'order_amount': record.get('order_amount'),
+                'return_quantity': record.get('return_quantity'),
+                'return_amount': record.get('return_amount'),
+                'return_quantity_pct': record.get('return_quantity_pct'),
+                'return_amount_pct': record.get('return_amount_pct'),
+                'return_rate': record.get('return_rate'),
+                'return_order_count': record.get('return_order_count'),
+                'gift_quantity': record.get('gift_quantity'),
+                'gift_amount': record.get('gift_amount'),
+                'gift_quantity_pct': record.get('gift_quantity_pct'),
+                'gift_amount_pct': record.get('gift_amount_pct'),
+                'dish_order_count': record.get('dish_order_count'),
+                'related_order_amount': record.get('related_order_amount'),
+                'sales_per_thousand': record.get('sales_per_thousand'),
+                'order_rate': record.get('order_rate'),
+                'customer_click_rate': record.get('customer_click_rate'),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            valid_records.append(supabase_record)
+
+        # Phase 2: Batch upsert all valid records with retry logic
+        if valid_records:
+            total_batches = (len(valid_records) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+            logger.info(f"Batch upserting {len(valid_records)} records in {total_batches} batch(es) (batch_size={self.BATCH_SIZE})...")
+
+            for i in range(0, len(valid_records), self.BATCH_SIZE):
+                batch = valid_records[i:i + self.BATCH_SIZE]
+                batch_num = (i // self.BATCH_SIZE) + 1
+
+                # Define the upsert operation for retry wrapper
+                def do_upsert():
+                    self._client.table('mt_dish_sales').upsert(
+                        batch,
+                        on_conflict='restaurant_id,business_date,dish_name'
+                    ).execute()
+
+                # Execute with retry
+                success = self._retry_with_backoff(do_upsert, batch_num, total_batches)
+
+                if success:
+                    stats["updated"] += len(batch)
+                    logger.info(f"Batch {batch_num}/{total_batches}: {len(batch)} records processed")
+                else:
+                    stats["failed"] += len(batch)
+
+        # Log summary
+        total = sum([stats["inserted"], stats["updated"], stats["skipped"], stats["failed"]])
+        logger.info(
+            f"Supabase dish_sales: {total} 条 - "
+            f"插入/更新:{stats['updated']} "
+            f"跳过:{stats['skipped']} 失败:{stats['failed']}"
+        )
+
+        if stats["unknown_stores"]:
+            logger.warning(
+                f"发现 {len(stats['unknown_stores'])} 个未知门店: "
+                f"{[s['store_name'] for s in stats['unknown_stores']]}"
+            )
+
+        return stats
+
 
 # Example usage
 if __name__ == "__main__":

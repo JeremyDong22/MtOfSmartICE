@@ -148,6 +148,62 @@ class DatabaseManager:
                     ON mt_business_summary(business_date)
                 """)
 
+                # Create mt_dish_sales table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS mt_dish_sales (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        store_name TEXT NOT NULL,
+                        org_code TEXT,
+                        business_date TEXT NOT NULL,
+                        dish_name TEXT NOT NULL,
+                        sales_quantity INTEGER,
+                        sales_quantity_pct REAL,
+                        price_before_discount REAL,
+                        price_after_discount REAL,
+                        sales_amount REAL,
+                        sales_amount_pct REAL,
+                        discount_amount REAL,
+                        dish_discount_pct REAL,
+                        dish_income REAL,
+                        dish_income_pct REAL,
+                        order_quantity INTEGER,
+                        order_amount REAL,
+                        return_quantity INTEGER,
+                        return_amount REAL,
+                        return_quantity_pct REAL,
+                        return_amount_pct REAL,
+                        return_rate REAL,
+                        return_order_count INTEGER,
+                        gift_quantity INTEGER,
+                        gift_amount REAL,
+                        gift_quantity_pct REAL,
+                        gift_amount_pct REAL,
+                        dish_order_count INTEGER,
+                        related_order_amount REAL,
+                        sales_per_thousand REAL,
+                        order_rate REAL,
+                        customer_click_rate REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(store_name, business_date, dish_name)
+                    )
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_dish_sales_store_date
+                    ON mt_dish_sales(store_name, business_date)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_dish_sales_date
+                    ON mt_dish_sales(business_date)
+                """)
+
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_dish_sales_dish_name
+                    ON mt_dish_sales(dish_name)
+                """)
+
                 conn.commit()
                 logger.info("Database tables created successfully")
 
@@ -531,6 +587,176 @@ class DatabaseManager:
 
         except sqlite3.Error as e:
             logger.error(f"Error saving business summary: {e}")
+            return stats
+
+    # ==================== Dish Sales Operations ====================
+
+    def save_dish_sales(self, records: List[Dict[str, Any]], force_update: bool = False) -> Dict[str, int]:
+        """
+        Save dish sales records with conditional duplicate handling.
+
+        Args:
+            records: List of record dictionaries
+            force_update: If True, always update existing records
+
+        Returns:
+            Dictionary with counts: {"inserted": N, "updated": N, "skipped": N}
+        """
+        stats = {"inserted": 0, "updated": 0, "skipped": 0}
+
+        if not records:
+            logger.warning("No records to save")
+            return stats
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                for record in records:
+                    store_name = record['store_name']
+                    business_date = record['business_date']
+                    dish_name = record['dish_name']
+
+                    # Check if record exists
+                    cursor.execute("""
+                        SELECT id, sales_quantity, sales_amount
+                        FROM mt_dish_sales
+                        WHERE store_name = ? AND business_date = ? AND dish_name = ?
+                    """, (store_name, business_date, dish_name))
+
+                    existing = cursor.fetchone()
+
+                    if not existing:
+                        # INSERT new record
+                        cursor.execute("""
+                            INSERT INTO mt_dish_sales (
+                                store_name, org_code, business_date, dish_name,
+                                sales_quantity, sales_quantity_pct,
+                                price_before_discount, price_after_discount,
+                                sales_amount, sales_amount_pct,
+                                discount_amount, dish_discount_pct,
+                                dish_income, dish_income_pct,
+                                order_quantity, order_amount,
+                                return_quantity, return_amount,
+                                return_quantity_pct, return_amount_pct,
+                                return_rate, return_order_count,
+                                gift_quantity, gift_amount,
+                                gift_quantity_pct, gift_amount_pct,
+                                dish_order_count, related_order_amount,
+                                sales_per_thousand, order_rate, customer_click_rate
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            store_name,
+                            record.get('org_code'),
+                            business_date,
+                            dish_name,
+                            record.get('sales_quantity'),
+                            record.get('sales_quantity_pct'),
+                            record.get('price_before_discount'),
+                            record.get('price_after_discount'),
+                            record.get('sales_amount'),
+                            record.get('sales_amount_pct'),
+                            record.get('discount_amount'),
+                            record.get('dish_discount_pct'),
+                            record.get('dish_income'),
+                            record.get('dish_income_pct'),
+                            record.get('order_quantity'),
+                            record.get('order_amount'),
+                            record.get('return_quantity'),
+                            record.get('return_amount'),
+                            record.get('return_quantity_pct'),
+                            record.get('return_amount_pct'),
+                            record.get('return_rate'),
+                            record.get('return_order_count'),
+                            record.get('gift_quantity'),
+                            record.get('gift_amount'),
+                            record.get('gift_quantity_pct'),
+                            record.get('gift_amount_pct'),
+                            record.get('dish_order_count'),
+                            record.get('related_order_amount'),
+                            record.get('sales_per_thousand'),
+                            record.get('order_rate'),
+                            record.get('customer_click_rate')
+                        ))
+                        stats["inserted"] += 1
+                    else:
+                        # Check if update is needed
+                        old_quantity = existing['sales_quantity'] or 0
+                        old_amount = existing['sales_amount'] or 0
+                        new_quantity = record.get('sales_quantity') or 0
+                        new_amount = record.get('sales_amount') or 0
+
+                        should_update = (
+                            new_quantity > old_quantity or
+                            new_amount > old_amount or
+                            force_update
+                        )
+
+                        if should_update:
+                            # UPDATE record
+                            cursor.execute("""
+                                UPDATE mt_dish_sales
+                                SET org_code = ?, sales_quantity = ?, sales_quantity_pct = ?,
+                                    price_before_discount = ?, price_after_discount = ?,
+                                    sales_amount = ?, sales_amount_pct = ?,
+                                    discount_amount = ?, dish_discount_pct = ?,
+                                    dish_income = ?, dish_income_pct = ?,
+                                    order_quantity = ?, order_amount = ?,
+                                    return_quantity = ?, return_amount = ?,
+                                    return_quantity_pct = ?, return_amount_pct = ?,
+                                    return_rate = ?, return_order_count = ?,
+                                    gift_quantity = ?, gift_amount = ?,
+                                    gift_quantity_pct = ?, gift_amount_pct = ?,
+                                    dish_order_count = ?, related_order_amount = ?,
+                                    sales_per_thousand = ?, order_rate = ?, customer_click_rate = ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (
+                                record.get('org_code'),
+                                new_quantity,
+                                record.get('sales_quantity_pct'),
+                                record.get('price_before_discount'),
+                                record.get('price_after_discount'),
+                                new_amount,
+                                record.get('sales_amount_pct'),
+                                record.get('discount_amount'),
+                                record.get('dish_discount_pct'),
+                                record.get('dish_income'),
+                                record.get('dish_income_pct'),
+                                record.get('order_quantity'),
+                                record.get('order_amount'),
+                                record.get('return_quantity'),
+                                record.get('return_amount'),
+                                record.get('return_quantity_pct'),
+                                record.get('return_amount_pct'),
+                                record.get('return_rate'),
+                                record.get('return_order_count'),
+                                record.get('gift_quantity'),
+                                record.get('gift_amount'),
+                                record.get('gift_quantity_pct'),
+                                record.get('gift_amount_pct'),
+                                record.get('dish_order_count'),
+                                record.get('related_order_amount'),
+                                record.get('sales_per_thousand'),
+                                record.get('order_rate'),
+                                record.get('customer_click_rate'),
+                                existing['id']
+                            ))
+                            stats["updated"] += 1
+                        else:
+                            stats["skipped"] += 1
+
+                conn.commit()
+
+                total = stats["inserted"] + stats["updated"] + stats["skipped"]
+                logger.info(
+                    f"Dish sales: {total} records - "
+                    f"{stats['inserted']} inserted, {stats['updated']} updated, {stats['skipped']} skipped"
+                )
+                return stats
+
+        except sqlite3.Error as e:
+            logger.error(f"Error saving dish sales: {e}")
             return stats
 
     def get_equity_sales(

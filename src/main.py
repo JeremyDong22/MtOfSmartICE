@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.browser import CDPSession, ensure_cdp_available, get_cdp_url
 from src.browser.cdp_launcher import DEFAULT_CDP_PORT, DEFAULT_PROFILE_DIR, DEFAULT_STARTUP_URL
 from src.sites import MeituanGuanjiaSite, DianpingSite
-from src.crawlers.guanjia import EquityPackageSalesCrawler, BusinessSummaryCrawler
+from src.crawlers.guanjia import EquityPackageSalesCrawler, BusinessSummaryCrawler, DishSalesCrawler
 from src.utils import get_yesterday, get_today
 from src.config import CDP_URL, LOG_DIR, SUPABASE_ENABLED
 from database.db_manager import DatabaseManager
@@ -58,7 +58,8 @@ SITES = {
         "startup_url": "https://pos.meituan.com",
         "reports": {
             "equity_package_sales": EquityPackageSalesCrawler,
-            "business_summary": BusinessSummaryCrawler
+            "business_summary": BusinessSummaryCrawler,
+            "dish_sales": DishSalesCrawler
         }
     },
     "dianping": {
@@ -293,7 +294,7 @@ def upload_to_supabase(records: List[Dict[str, Any]], report_type: str) -> Dict[
 
     Args:
         records: List of records to upload
-        report_type: Report type ('equity_package_sales' or 'business_summary')
+        report_type: Report type ('equity_package_sales', 'business_summary', or 'dish_sales')
     """
     try:
         supabase_mgr = SupabaseManager()
@@ -302,6 +303,8 @@ def upload_to_supabase(records: List[Dict[str, Any]], report_type: str) -> Dict[
             stats = supabase_mgr.save_equity_package_sales(records)
         elif report_type == "business_summary":
             stats = supabase_mgr.save_business_summary(records)
+        elif report_type == "dish_sales":
+            stats = supabase_mgr.save_dish_sales(records)
         else:
             logger.warning(f"Unknown report type for Supabase: {report_type}")
             return {"inserted": 0, "updated": 0, "failed": 0, "skipped": len(records)}
