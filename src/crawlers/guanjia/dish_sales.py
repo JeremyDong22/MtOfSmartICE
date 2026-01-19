@@ -142,6 +142,9 @@ class DishSalesCrawler(BaseCrawler):
         try:
             logger.info("Configuring filters...")
 
+            # Wait for page to fully load
+            await asyncio.sleep(2)
+
             # Ensure checkboxes are checked
             await self._ensure_checkboxes_checked()
             await asyncio.sleep(0.5)
@@ -156,16 +159,14 @@ class DishSalesCrawler(BaseCrawler):
             await self._set_date_range(self.target_date, self.end_date)
             await asyncio.sleep(0.5)
 
-            # Click query button
+            # Click query button using specific selector
             logger.info("Clicking 查询")
             query_clicked = await self.page.evaluate('''() => {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                    const text = btn.textContent || '';
-                    if (text.includes('查询') && !text.includes('常用')) {
-                        btn.click();
-                        return true;
-                    }
+                const selector = '#__root_wrapper_rms-report > div > div > div > div.auto2-page-slot_filter > div > div > div.auto2-query-item.action > button.ant-btn.ant-btn-primary';
+                const btn = document.querySelector(selector);
+                if (btn) {
+                    btn.click();
+                    return true;
                 }
                 return false;
             }''')
@@ -174,8 +175,31 @@ class DishSalesCrawler(BaseCrawler):
                 logger.warning("Could not find 查询 button")
                 return False
 
-            # Wait for results to load (dish sales needs more time)
-            await asyncio.sleep(10)
+            # Wait for results to load - dish sales can take 15-20 seconds
+            logger.info("Waiting for query results to load...")
+
+            # Wait for loading indicators to disappear
+            max_wait = 30  # Maximum 30 seconds
+            wait_interval = 2
+            elapsed = 0
+
+            while elapsed < max_wait:
+                await asyncio.sleep(wait_interval)
+                elapsed += wait_interval
+
+                # Check if data has loaded by looking for pagination text
+                has_data = await self.page.evaluate('''() => {
+                    return document.body.innerText.includes('条记录');
+                }''')
+
+                if has_data:
+                    logger.info(f"Query results loaded after {elapsed} seconds")
+                    break
+
+                logger.debug(f"Still waiting for results... ({elapsed}s)")
+
+            if elapsed >= max_wait:
+                logger.warning(f"Query results did not load after {max_wait} seconds")
 
             return True
 
@@ -214,10 +238,9 @@ class DishSalesCrawler(BaseCrawler):
     async def _set_sales_method(self) -> None:
         """Set 销售方式 to '单品+套餐明细' by clicking dropdown and selecting option."""
         try:
-            # Click the sales method dropdown (third .ant-select on the page)
+            # Click the sales method dropdown
             result = await self.page.evaluate('''() => {
                 const selects = document.querySelectorAll('.ant-select');
-                // Find the one with '单品+套餐' text
                 for (const select of selects) {
                     const text = select.textContent || '';
                     if (text.includes('单品+套餐') && !text.includes('明细')) {
@@ -235,62 +258,110 @@ class DishSalesCrawler(BaseCrawler):
             # Wait for dropdown to open
             await asyncio.sleep(1.5)
 
-            # Select "单品+套餐明细" option
+            # Select "单品+套餐明细" using the specific CSS selector
             result2 = await self.page.evaluate('''() => {
-                // Find the dropdown menu items
-                const items = document.querySelectorAll('.ant-select-dropdown-menu-item');
-                for (const item of items) {
-                    const text = item.textContent?.trim() || '';
-                    if (text === '单品+套餐明细') {
-                        item.click();
-                        return { success: true, selected: text };
-                    }
+                const selector = '#rc-tree-select-list_3 > ul > li:nth-child(4) > span.ant-select-tree-node-content-wrapper.ant-select-tree-node-content-wrapper-normal > span';
+                const element = document.querySelector(selector);
+                if (element) {
+                    element.click();
+                    return { success: true, selected: '单品+套餐明细' };
                 }
-
-                // If not found, list all available options for debugging
-                const allOptions = [];
-                for (const item of items) {
-                    allOptions.push(item.textContent?.trim());
-                }
-                return { success: false, reason: 'option_not_found', available: allOptions };
+                return { success: false, reason: 'selector_not_found' };
             }''')
 
             if result2.get('success'):
                 logger.info(f"Selected 销售方式: {result2.get('selected')}")
             else:
-                logger.warning(f"Could not select option: {result2.get('reason')}, available: {result2.get('available')}")
+                logger.warning(f"Could not select option: {result2.get('reason')}")
 
         except Exception as e:
             logger.warning(f"Error setting sales method: {e}")
 
     async def _set_date_range(self, start_date: str, end_date: str) -> None:
-        """Set date range using JavaScript (inputs are readonly)."""
+        """Set date range by clicking calendar cells."""
         try:
-            # Convert YYYY-MM-DD to YYYY/MM/DD
+            from datetime import datetime
+
+            # Parse dates
             start_formatted = start_date.replace('-', '/')
             end_formatted = end_date.replace('-', '/')
 
-            # Set dates using JavaScript (inputs are readonly)
-            # Note: inputs[0] is week selector, inputs[1] and inputs[2] are the date range
-            await self.page.evaluate('''(dates) => {
+            logger.info(f"=== DATE SETTING START ===")
+            logger.info(f"Target: {start_formatted} to {end_formatted}")
+
+            # Check if dates are already set correctly
+            current_values = await self.page.evaluate('''() => {
                 const inputs = document.querySelectorAll('input[placeholder="请选择日期"]');
-                if (inputs.length >= 3) {
-                    inputs[1].value = dates.start;
-                    inputs[2].value = dates.end;
+                if (inputs.length < 2) return {found: inputs.length};
+                const startIdx = inputs.length === 2 ? 0 : 1;
+                const endIdx = inputs.length === 2 ? 1 : 2;
+                return {
+                    found: inputs.length,
+                    start: inputs[startIdx]?.value || '',
+                    end: inputs[endIdx]?.value || ''
+                };
+            }''')
 
-                    // Trigger change events
-                    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
-                    inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[2].dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }''', {'start': start_formatted, 'end': end_formatted})
+            logger.info(f"Current dates: {current_values.get('start')} to {current_values.get('end')}")
 
+            if (current_values.get('start') == start_formatted and
+                current_values.get('end') == end_formatted):
+                logger.info(f"✓ Dates already correct, skipping date selection")
+                logger.info(f"=== DATE SETTING COMPLETE ===")
+                return
+
+            # Parse dates to Chinese format for calendar cell titles
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            start_title = f"{start_dt.year}年{start_dt.month}月{start_dt.day}日"
+            end_title = f"{end_dt.year}年{end_dt.month}月{end_dt.day}日"
+
+            logger.info(f"Looking for calendar cells: {start_title}, {end_title}")
+
+            # Click first input to open calendar
+            await self.page.evaluate('''() => {
+                const inputs = document.querySelectorAll('input[placeholder="请选择日期"]');
+                const startIdx = inputs.length === 2 ? 0 : 1;
+                inputs[startIdx]?.click();
+            }''')
+            await asyncio.sleep(1)
+
+            # Click start date
+            result1 = await self.page.evaluate(f'''() => {{
+                const cell = document.querySelector('.ant-calendar-cell[title="{start_title}"]');
+                if (cell) {{
+                    cell.click();
+                    return {{success: true}};
+                }}
+                return {{success: false, error: 'Start date cell not found'}};
+            }}''')
+
+            if not result1.get('success'):
+                raise Exception(f"Failed to click start date: {result1.get('error')}")
+
+            logger.info(f"✓ Clicked start date: {start_title}")
             await asyncio.sleep(0.5)
-            logger.info(f"Set date range: {start_formatted} to {end_formatted}")
+
+            # Click end date
+            result2 = await self.page.evaluate(f'''() => {{
+                const cell = document.querySelector('.ant-calendar-cell[title="{end_title}"]');
+                if (cell) {{
+                    cell.click();
+                    return {{success: true}};
+                }}
+                return {{success: false, error: 'End date cell not found'}};
+            }}''')
+
+            if not result2.get('success'):
+                raise Exception(f"Failed to click end date: {result2.get('error')}")
+
+            logger.info(f"✓ Clicked end date: {end_title}")
+            await asyncio.sleep(0.5)
+            logger.info(f"=== DATE SETTING COMPLETE ===")
 
         except Exception as e:
-            logger.error(f"Error setting date range: {e}")
+            logger.error(f"Date setting failed: {e}")
+            raise
 
     async def _get_pagination_info(self) -> Dict[str, Any]:
         """Get pagination information."""
@@ -316,10 +387,12 @@ class DishSalesCrawler(BaseCrawler):
                     total_records: totalRecords,
                     total_pages: totalPages,
                     current_page: currentPage,
-                    per_page: perPage
+                    per_page: perPage,
+                    debug_match: totalMatch ? totalMatch[0] : null,
+                    debug_has_text: allText.includes('条记录')
                 };
             }''')
-            logger.info(f"Pagination: {info['total_records']} records, {info['total_pages']} pages")
+            logger.info(f"Pagination: {info['total_records']} records, {info['total_pages']} pages (debug: match={info.get('debug_match')}, has_text={info.get('debug_has_text')})")
             return info
         except Exception as e:
             logger.warning(f"Error getting pagination: {e}")
@@ -474,6 +547,9 @@ class DishSalesCrawler(BaseCrawler):
     async def _extract_all_pages(self) -> List[Dict[str, Any]]:
         """Extract data from all pages."""
         all_data = []
+
+        # Wait a bit more for pagination to render
+        await asyncio.sleep(2)
 
         pagination = await self._get_pagination_info()
         total_pages = pagination.get('total_pages', 1)
