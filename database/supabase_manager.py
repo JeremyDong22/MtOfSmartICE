@@ -863,39 +863,38 @@ class SupabaseManager:
                 stats["skipped"] += 1
                 continue
 
-            # Transform to Supabase format
+            # Transform to Supabase format (using Chinese column names)
             supabase_record = {
                 'restaurant_id': restaurant_id,
-                'business_date': business_date,
-                'dish_name': dish_name,
-                'org_code': record.get('org_code'),
-                'sales_quantity': record.get('sales_quantity'),
-                'sales_quantity_pct': record.get('sales_quantity_pct'),
-                'price_before_discount': record.get('price_before_discount'),
-                'price_after_discount': record.get('price_after_discount'),
-                'sales_amount': record.get('sales_amount'),
-                'sales_amount_pct': record.get('sales_amount_pct'),
-                'discount_amount': record.get('discount_amount'),
-                'dish_discount_pct': record.get('dish_discount_pct'),
-                'dish_income': record.get('dish_income'),
-                'dish_income_pct': record.get('dish_income_pct'),
-                'order_quantity': record.get('order_quantity'),
-                'order_amount': record.get('order_amount'),
-                'return_quantity': record.get('return_quantity'),
-                'return_amount': record.get('return_amount'),
-                'return_quantity_pct': record.get('return_quantity_pct'),
-                'return_amount_pct': record.get('return_amount_pct'),
-                'return_rate': record.get('return_rate'),
-                'return_order_count': record.get('return_order_count'),
-                'gift_quantity': record.get('gift_quantity'),
-                'gift_amount': record.get('gift_amount'),
-                'gift_quantity_pct': record.get('gift_quantity_pct'),
-                'gift_amount_pct': record.get('gift_amount_pct'),
-                'dish_order_count': record.get('dish_order_count'),
-                'related_order_amount': record.get('related_order_amount'),
-                'sales_per_thousand': record.get('sales_per_thousand'),
-                'order_rate': record.get('order_rate'),
-                'customer_click_rate': record.get('customer_click_rate'),
+                '营业日期': business_date,
+                '菜品名称': dish_name,
+                '销售数量': record.get('sales_quantity'),
+                '销售数量占比': record.get('sales_quantity_pct'),
+                '折前均价': record.get('price_before_discount'),
+                '折后均价': record.get('price_after_discount'),
+                '销售额': record.get('sales_amount'),
+                '销售额占比': record.get('sales_amount_pct'),
+                '优惠金额': record.get('discount_amount'),
+                '菜品优惠占比': record.get('dish_discount_pct'),
+                '菜品收入': record.get('dish_income'),
+                '菜品收入占比': record.get('dish_income_pct'),
+                '点菜数量': record.get('order_quantity'),
+                '点菜金额': record.get('order_amount'),
+                '退菜数量': record.get('return_quantity'),
+                '退菜金额': record.get('return_amount'),
+                '退菜数量占比': record.get('return_quantity_pct'),
+                '退菜金额占比': record.get('return_amount_pct'),
+                '退菜率': record.get('return_rate'),
+                '退菜订单量': record.get('return_order_count'),
+                '赠菜数量': record.get('gift_quantity'),
+                '赠菜金额': record.get('gift_amount'),
+                '赠菜数量占比': record.get('gift_quantity_pct'),
+                '赠菜金额占比': record.get('gift_amount_pct'),
+                '菜品销售订单量': record.get('dish_order_count'),
+                '关联订单金额': record.get('related_order_amount'),
+                '菜品销售千次': record.get('sales_per_thousand'),
+                '菜品点单率': record.get('order_rate'),
+                '顾客点击率': record.get('customer_click_rate'),
                 'updated_at': datetime.utcnow().isoformat()
             }
 
@@ -914,7 +913,7 @@ class SupabaseManager:
                 def do_upsert():
                     self._client.table('mt_dish_sales').upsert(
                         batch,
-                        on_conflict='restaurant_id,business_date,dish_name'
+                        on_conflict='restaurant_id,营业日期,菜品名称'
                     ).execute()
 
                 # Execute with retry

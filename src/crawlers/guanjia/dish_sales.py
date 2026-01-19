@@ -159,6 +159,10 @@ class DishSalesCrawler(BaseCrawler):
             await self._set_date_range(self.target_date, self.end_date)
             await asyncio.sleep(0.5)
 
+            # CRITICAL: Verify dates are set correctly before querying
+            # If date range spans multiple days, data will be aggregated and incorrect
+            await self._verify_dates_set_correctly()
+
             # Click query button using specific selector
             logger.info("Clicking 查询")
             query_clicked = await self.page.evaluate('''() => {
@@ -178,10 +182,12 @@ class DishSalesCrawler(BaseCrawler):
             # Wait for results to load - dish sales can take 15-20 seconds
             logger.info("Waiting for query results to load...")
 
-            # Wait for loading indicators to disappear
-            max_wait = 30  # Maximum 30 seconds
+            # Wait for loading indicators to disappear with retry logic
+            max_wait = 45  # Maximum 45 seconds (increased for slow network)
             wait_interval = 2
             elapsed = 0
+            retry_count = 0
+            max_retries = 2
 
             while elapsed < max_wait:
                 await asyncio.sleep(wait_interval)
@@ -196,10 +202,29 @@ class DishSalesCrawler(BaseCrawler):
                     logger.info(f"Query results loaded after {elapsed} seconds")
                     break
 
+                # Check for error messages
+                has_error = await self.page.evaluate('''() => {
+                    const text = document.body.innerText;
+                    return text.includes('查询失败') || text.includes('网络错误') || text.includes('加载失败');
+                }''')
+
+                if has_error and retry_count < max_retries:
+                    logger.warning(f"Query failed, retrying ({retry_count + 1}/{max_retries})...")
+                    # Click query button again
+                    await self.page.evaluate('''() => {
+                        const selector = '#__root_wrapper_rms-report > div > div > div > div.auto2-page-slot_filter > div > div > div.auto2-query-item.action > button.ant-btn.ant-btn-primary';
+                        const btn = document.querySelector(selector);
+                        if (btn) btn.click();
+                    }''')
+                    retry_count += 1
+                    elapsed = 0  # Reset timer for retry
+                    continue
+
                 logger.debug(f"Still waiting for results... ({elapsed}s)")
 
             if elapsed >= max_wait:
-                logger.warning(f"Query results did not load after {max_wait} seconds")
+                logger.error(f"Query results did not load after {max_wait} seconds")
+                return False
 
             return True
 
@@ -361,6 +386,50 @@ class DishSalesCrawler(BaseCrawler):
 
         except Exception as e:
             logger.error(f"Date setting failed: {e}")
+            raise
+
+    async def _verify_dates_set_correctly(self) -> None:
+        """
+        Verify that dates shown in browser match target dates.
+        CRITICAL: If dates don't match, data will be aggregated across multiple days and incorrect.
+        """
+        try:
+            start_formatted = self.target_date.replace('-', '/')
+            end_formatted = self.end_date.replace('-', '/')
+
+            # Get actual dates shown in browser
+            actual_dates = await self.page.evaluate('''() => {
+                const inputs = document.querySelectorAll('input[placeholder="请选择日期"]');
+                if (inputs.length < 2) return {found: inputs.length};
+                const startIdx = inputs.length === 2 ? 0 : 1;
+                const endIdx = inputs.length === 2 ? 1 : 2;
+                return {
+                    found: inputs.length,
+                    start: inputs[startIdx]?.value || '',
+                    end: inputs[endIdx]?.value || ''
+                };
+            }''')
+
+            actual_start = actual_dates.get('start')
+            actual_end = actual_dates.get('end')
+
+            logger.info(f"Date verification: Expected {start_formatted} to {end_formatted}, Got {actual_start} to {actual_end}")
+
+            if actual_start != start_formatted or actual_end != end_formatted:
+                error_msg = (
+                    f"DATE MISMATCH ERROR: Dates in browser don't match target dates!\n"
+                    f"Expected: {start_formatted} to {end_formatted}\n"
+                    f"Actual:   {actual_start} to {actual_end}\n"
+                    f"This will cause data aggregation across multiple days and produce incorrect results.\n"
+                    f"Stopping crawl to prevent data corruption."
+                )
+                logger.error(error_msg)
+                raise Exception(error_msg)
+
+            logger.info("✓ Date verification passed")
+
+        except Exception as e:
+            logger.error(f"Date verification failed: {e}")
             raise
 
     async def _get_pagination_info(self) -> Dict[str, Any]:

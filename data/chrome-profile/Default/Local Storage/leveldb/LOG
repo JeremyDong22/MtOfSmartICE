@@ -1,0 +1,74 @@
+2026/01/12-20:46:18.504 5 Creating DB /home/smartice002/smartice/MtOfSmartICE/data/chrome-profile/Default/Local Storage/leveldb since it was missing.
+2026/01/12-20:46:18.511 5 Reusing MANIFEST /home/smartice002/smartice/MtOfSmartICE/data/chrome-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/01/12-20:53:19.201 5 Level-0 table #5: started
+2026/01/12-20:53:19.203 5 Level-0 table #5: 28387 bytes OK
+2026/01/12-20:53:19.205 5 Delete type=0 #3
+2026/01/12-20:56:19.202 7 Level-0 table #7: started
+2026/01/12-20:56:19.206 7 Level-0 table #7: 60361 bytes OK
+2026/01/12-20:56:19.210 7 Delete type=0 #4
+2026/01/13-00:00:22.763 5 Level-0 table #9: started
+2026/01/13-00:00:22.767 5 Level-0 table #9: 25170 bytes OK
+2026/01/13-00:00:22.771 5 Delete type=0 #6
+2026/01/13-17:13:50.848 7 Level-0 table #11: started
+2026/01/13-17:13:50.852 7 Level-0 table #11: 31552 bytes OK
+2026/01/13-17:13:50.855 7 Delete type=0 #8
+2026/01/14-00:50:50.981 7 Level-0 table #13: started
+2026/01/14-00:50:50.984 7 Level-0 table #13: 50919 bytes OK
+2026/01/14-00:50:50.987 7 Delete type=0 #10
+2026/01/14-03:45:44.624 7 Level-0 table #15: started
+2026/01/14-03:45:44.628 7 Level-0 table #15: 69297 bytes OK
+2026/01/14-03:45:44.631 7 Delete type=0 #12
+2026/01/14-03:45:44.632 7 Compacting 4@0 + 1@1 files
+2026/01/14-03:45:44.637 7 Generated table #16@0: 112 keys, 54596 bytes
+2026/01/14-03:45:44.637 7 Compacted 4@0 + 1@1 files => 54596 bytes
+2026/01/14-03:45:44.639 7 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/01/14-03:45:44.640 7 Delete type=2 #11
+2026/01/14-03:45:44.640 7 Delete type=2 #15
+2026/01/14-03:45:44.640 7 Delete type=2 #7
+2026/01/14-03:45:44.640 7 Delete type=2 #13
+2026/01/14-03:45:44.640 7 Delete type=2 #9
+2026/01/14-03:47:14.156 7 Level-0 table #18: started
+2026/01/14-03:47:14.160 7 Level-0 table #18: 59914 bytes OK
+2026/01/14-03:47:14.163 7 Delete type=0 #14
+2026/01/15-01:01:23.832 7 Level-0 table #20: started
+2026/01/15-01:01:23.837 7 Level-0 table #20: 60100 bytes OK
+2026/01/15-01:01:23.841 7 Delete type=0 #17
+2026/01/16-01:01:24.775 7 Level-0 table #22: started
+2026/01/16-01:01:24.779 7 Level-0 table #22: 60061 bytes OK
+2026/01/16-01:01:24.783 7 Delete type=0 #19
+2026/01/18-01:00:22.912 5 Level-0 table #24: started
+2026/01/18-01:00:22.916 5 Level-0 table #24: 26614 bytes OK
+2026/01/18-01:00:22.920 5 Delete type=0 #21
+2026/01/18-01:00:22.921 5 Compacting 4@0 + 1@1 files
+2026/01/18-01:00:22.925 5 Generated table #25@0: 156 keys, 7102 bytes
+2026/01/18-01:00:22.925 5 Compacted 4@0 + 1@1 files => 7102 bytes
+2026/01/18-01:00:22.927 5 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/01/18-01:00:22.928 5 Delete type=2 #22
+2026/01/18-01:00:22.929 5 Delete type=2 #20
+2026/01/18-01:00:22.929 5 Delete type=2 #24
+2026/01/18-01:00:22.929 5 Delete type=2 #16
+2026/01/18-01:00:22.929 5 Delete type=2 #18
+2026/01/19-01:02:24.368 7 Level-0 table #27: started
+2026/01/19-01:02:24.373 7 Level-0 table #27: 32196 bytes OK
+2026/01/19-01:02:24.377 7 Delete type=0 #23
+2026/01/20-01:01:16.583 5 Level-0 table #29: started
+2026/01/20-01:01:16.586 5 Level-0 table #29: 48920 bytes OK
+2026/01/20-01:01:16.587 5 Delete type=0 #26
+2026/01/20-03:22:45.198 5 Level-0 table #31: started
+2026/01/20-03:22:45.200 5 Level-0 table #31: 32581 bytes OK
+2026/01/20-03:22:45.202 5 Delete type=0 #28
+2026/01/20-03:23:27.549 7 Level-0 table #33: started
+2026/01/20-03:23:27.553 7 Level-0 table #33: 56209 bytes OK
+2026/01/20-03:23:27.556 7 Delete type=0 #30
+2026/01/20-03:23:27.557 7 Compacting 4@0 + 1@1 files
+2026/01/20-03:23:27.562 7 Generated table #34@0: 194 keys, 57191 bytes
+2026/01/20-03:23:27.562 7 Compacted 4@0 + 1@1 files => 57191 bytes
+2026/01/20-03:23:27.564 7 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/01/20-03:23:27.566 7 Delete type=2 #27
+2026/01/20-03:23:27.566 7 Delete type=2 #31
+2026/01/20-03:23:27.566 7 Delete type=2 #25
+2026/01/20-03:23:27.566 7 Delete type=2 #29
+2026/01/20-03:23:27.566 7 Delete type=2 #33
+2026/01/20-05:09:41.111 7 Level-0 table #36: started
+2026/01/20-05:09:41.113 7 Level-0 table #36: 12333 bytes OK
+2026/01/20-05:09:41.114 7 Delete type=0 #32
