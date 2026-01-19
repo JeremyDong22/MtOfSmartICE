@@ -1,4 +1,7 @@
 # Daily Crawler - Unified entry point for multi-site crawling
+# v3.5 - Enhanced retry logic to retry at least once for any error
+#   - All errors now get at least 1 retry attempt (not just timeouts)
+#   - Timeout errors still get up to 3 retry attempts
 # v3.4 - Add retry mechanism for timeout errors & optimize navigation wait strategy
 #   - Changed wait_until from 'networkidle' to 'domcontentloaded' for faster, more reliable navigation
 #   - Added 3-attempt retry logic for timeout errors (retries entire report from navigation)
@@ -244,10 +247,18 @@ async def main():
                         # Success - break retry loop
                         break
                     else:
-                        logger.error(f"Crawl failed: {result.get('error')}")
-                        results["error"] = result.get("error")
-                        # Don't retry if crawl logic failed (not a timeout)
-                        break
+                        error_msg = result.get("error")
+                        logger.error(f"Crawl failed: {error_msg}")
+                        results["error"] = error_msg
+
+                        # Retry at least once for any error
+                        if attempt < 1:
+                            logger.info(f"Retrying {report_key} once for error: {error_msg}")
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            # Already retried once, don't retry again for non-timeout errors
+                            break
 
                 except Exception as e:
                     error_msg = str(e)
