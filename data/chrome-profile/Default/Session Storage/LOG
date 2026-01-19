@@ -1,2 +1,5 @@
 2026/01/12-20:46:18.581 5 Creating DB /home/smartice002/smartice/MtOfSmartICE/data/chrome-profile/Default/Session Storage since it was missing.
 2026/01/12-20:46:18.583 5 Reusing MANIFEST /home/smartice002/smartice/MtOfSmartICE/data/chrome-profile/Default/Session Storage/MANIFEST-000001
+2026/01/20-06:07:35.497 7 Level-0 table #5: started
+2026/01/20-06:07:35.498 7 Level-0 table #5: 11160 bytes OK
+2026/01/20-06:07:35.500 7 Delete type=0 #3
