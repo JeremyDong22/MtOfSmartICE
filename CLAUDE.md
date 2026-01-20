@@ -8,6 +8,7 @@ Multi-Site Merchant Backend Crawler - automated daily crawler for:
 - **美团管家** (pos.meituan.com):
   - 权益包售卖汇总表 (equity_package_sales) - Package sales by store/date
   - 综合营业统计 (business_summary) - Revenue, orders, payment composition
+  - 菜品综合统计 (dish_sales) - Dish-level sales, returns, gifts statistics
 - **大众点评** (e.dianping.com): [skeleton ready, crawlers pending]
 
 Uses CDP-only browser connection and 集团账号 (group account) for aggregated data across all stores.
@@ -36,11 +37,14 @@ python src/main.py
 # 美团管家 - 综合营业统计
 python src/main.py --report business_summary
 
+# 美团管家 - 菜品综合统计
+python src/main.py --report dish_sales
+
 # Run ALL crawlers sequentially (recommended for cron)
 python src/main.py --report all
 
 # Run specific crawlers sequentially
-python src/main.py --report equity_package_sales business_summary
+python src/main.py --report equity_package_sales business_summary dish_sales
 
 # Specific date (default: yesterday)
 python src/main.py --date 2025-12-13
@@ -132,7 +136,8 @@ src/
 │   ├── base_crawler.py               # Abstract base class
 │   ├── guanjia/                      # 美团管家 crawlers
 │   │   ├── equity_package_sales.py   # 权益包售卖汇总表
-│   │   └── business_summary.py       # 综合营业统计
+│   │   ├── business_summary.py       # 综合营业统计
+│   │   └── dish_sales.py             # 菜品综合统计
 │   └── dianping/                     # 大众点评 crawlers
 │       └── (pending)
 │
@@ -243,10 +248,12 @@ All settings in `src/config.py`:
   - `mt_stores` - Store info
   - `mt_equity_package_sales` - Package sales data
   - `mt_business_summary` - Daily revenue/composition data (JSON for nested columns)
+  - `mt_dish_sales` - Dish-level sales statistics (30+ metrics)
 - **Cloud Supabase**:
   - `master_restaurant` - Store master data with mappings
   - `mt_equity_package_sales` - Package sales
   - `mt_business_summary` - Business summary with composition_data JSON
+  - `mt_dish_sales` - Dish sales with Chinese column names
 - **映射关系**: org_code (美团) ↔ restaurant_id (Supabase)
 
 ## Important Notes

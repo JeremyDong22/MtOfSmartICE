@@ -1,5 +1,5 @@
 # Database Schema
-<!-- v1.2 - 2025-12-18 - Changed Supabase mt_business_summary column names to Chinese -->
+<!-- v1.3 - 2025-01-20 - Added mt_dish_sales table for dish-level sales statistics -->
 
 本文档描述美团爬虫项目的数据库结构，包括本地 SQLite 和云端 Supabase。
 
@@ -69,6 +69,53 @@
 
 **唯一约束**: `(store_name, business_date)`
 
+### mt_dish_sales
+菜品综合统计数据表（来自报表中心→营业报表→菜品综合统计）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER | 自增主键 |
+| store_name | TEXT | 门店名称 |
+| org_code | TEXT | 机构编码 |
+| business_date | TEXT | 营业日期 (YYYY-MM-DD) |
+| dish_name | TEXT | 菜品名称 |
+| sales_quantity | INTEGER | 销售数量 |
+| sales_quantity_pct | REAL | 销售数量占比 |
+| price_before_discount | REAL | 折前均价 |
+| price_after_discount | REAL | 折后均价 |
+| sales_amount | REAL | 销售额 |
+| sales_amount_pct | REAL | 销售额占比 |
+| discount_amount | REAL | 优惠金额 |
+| dish_discount_pct | REAL | 菜品优惠占比 |
+| dish_income | REAL | 菜品收入 |
+| dish_income_pct | REAL | 菜品收入占比 |
+| order_quantity | INTEGER | 点菜数量 |
+| order_amount | REAL | 点菜金额 |
+| return_quantity | INTEGER | 退菜数量 |
+| return_amount | REAL | 退菜金额 |
+| return_quantity_pct | REAL | 退菜数量占比 |
+| return_amount_pct | REAL | 退菜金额占比 |
+| return_rate | REAL | 退菜率 |
+| return_order_count | INTEGER | 退菜订单量 |
+| gift_quantity | INTEGER | 赠菜数量 |
+| gift_amount | REAL | 赠菜金额 |
+| gift_quantity_pct | REAL | 赠菜数量占比 |
+| gift_amount_pct | REAL | 赠菜金额占比 |
+| dish_order_count | INTEGER | 菜品销售订单量 |
+| related_order_amount | REAL | 关联订单金额 |
+| sales_per_thousand | REAL | 菜品销售千次 |
+| order_rate | REAL | 菜品点单率 |
+| customer_click_rate | REAL | 顾客点击率 |
+| created_at | TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | 更新时间 |
+
+**唯一约束**: `(store_name, business_date, dish_name)`
+
+**索引**:
+- `idx_dish_sales_store_date`: (store_name, business_date)
+- `idx_dish_sales_date`: (business_date)
+- `idx_dish_sales_dish_name`: (dish_name)
+
 ---
 
 ## 云端 Supabase
@@ -136,6 +183,52 @@
 **索引**:
 - `idx_business_summary_restaurant_date`: (restaurant_id, 营业日期)
 - `idx_business_summary_date`: (营业日期)
+
+### mt_dish_sales
+菜品综合统计数据表（云端版本，使用中文列名）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 主键 |
+| restaurant_id | UUID | 外键 → master_restaurant.id |
+| 营业日期 | DATE | 营业日期 |
+| 菜品名称 | TEXT | 菜品名称 |
+| 销售数量 | INTEGER | 销售数量 |
+| 销售数量占比 | NUMERIC | 销售数量占比 |
+| 折前均价 | NUMERIC | 折前均价 |
+| 折后均价 | NUMERIC | 折后均价 |
+| 销售额 | NUMERIC | 销售额 |
+| 销售额占比 | NUMERIC | 销售额占比 |
+| 优惠金额 | NUMERIC | 优惠金额 |
+| 菜品优惠占比 | NUMERIC | 菜品优惠占比 |
+| 菜品收入 | NUMERIC | 菜品收入 |
+| 菜品收入占比 | NUMERIC | 菜品收入占比 |
+| 点菜数量 | INTEGER | 点菜数量 |
+| 点菜金额 | NUMERIC | 点菜金额 |
+| 退菜数量 | INTEGER | 退菜数量 |
+| 退菜金额 | NUMERIC | 退菜金额 |
+| 退菜数量占比 | NUMERIC | 退菜数量占比 |
+| 退菜金额占比 | NUMERIC | 退菜金额占比 |
+| 退菜率 | NUMERIC | 退菜率 |
+| 退菜订单量 | INTEGER | 退菜订单量 |
+| 赠菜数量 | INTEGER | 赠菜数量 |
+| 赠菜金额 | NUMERIC | 赠菜金额 |
+| 赠菜数量占比 | NUMERIC | 赠菜数量占比 |
+| 赠菜金额占比 | NUMERIC | 赠菜金额占比 |
+| 菜品销售订单量 | INTEGER | 菜品销售订单量 |
+| 关联订单金额 | NUMERIC | 关联订单金额 |
+| 菜品销售千次 | NUMERIC | 菜品销售千次 |
+| 菜品点单率 | NUMERIC | 菜品点单率 |
+| 顾客点击率 | NUMERIC | 顾客点击率 |
+| created_at | TIMESTAMPTZ | 创建时间 |
+| updated_at | TIMESTAMPTZ | 更新时间 |
+
+**唯一约束**: `(restaurant_id, 营业日期, 菜品名称)`
+
+**索引**:
+- `idx_dish_sales_restaurant_date`: (restaurant_id, 营业日期)
+- `idx_dish_sales_date`: (营业日期)
+- `idx_dish_sales_dish_name`: (菜品名称)
 
 ---
 
