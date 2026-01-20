@@ -49,8 +49,12 @@ python src/main.py --report equity_package_sales business_summary dish_sales
 # Specific date (default: yesterday)
 python src/main.py --date 2025-12-13
 
-# Date range (3 days back)
-python src/main.py --date 2025-12-09 --end-date 2025-12-15
+# Date range (equity_package_sales and business_summary support ranges)
+python src/main.py --report equity_package_sales business_summary --date 2025-12-09 --end-date 2025-12-15
+
+# IMPORTANT: dish_sales does NOT support date ranges - it aggregates data
+# Run dish_sales for each date individually:
+python src/main.py --report dish_sales --date 2025-12-13
 
 # Force re-crawl (update existing records even if values unchanged)
 python src/main.py --force
