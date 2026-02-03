@@ -60,14 +60,23 @@ class DishSalesCrawler(BaseCrawler):
         super().__init__(page, frame, db_manager, target_date)
 
         # Dish sales requires SAME date for start and end (not a range)
-        # If dates are different, data will aggregate across dates
+        # If dates are different, data will aggregate across dates and produce INCORRECT results
         if not end_date:
             self.end_date = target_date
         else:
             self.end_date = end_date
 
+        # CRITICAL: Reject date ranges to prevent data corruption
         if self.end_date != target_date:
-            logger.warning(f"Dish sales works best with same start/end date, but got {target_date} to {self.end_date}")
+            error_msg = (
+                f"ERROR: dish_sales crawler does NOT support date ranges!\n"
+                f"Requested: {target_date} to {self.end_date}\n"
+                f"Date ranges cause data aggregation and produce INCORRECT results.\n"
+                f"Please run dish_sales for ONE day at a time.\n"
+                f"Example: python src/main.py --report dish_sales --date 2026-01-31"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         self.skip_navigation = skip_navigation
         self.force_update = force_update

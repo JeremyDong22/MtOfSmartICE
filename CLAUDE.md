@@ -52,9 +52,13 @@ python src/main.py --date 2025-12-13
 # Date range (equity_package_sales and business_summary support ranges)
 python src/main.py --report equity_package_sales business_summary --date 2025-12-09 --end-date 2025-12-15
 
-# IMPORTANT: dish_sales does NOT support date ranges - it aggregates data
-# Run dish_sales for each date individually:
+# CRITICAL: dish_sales does NOT support date ranges - it will FAIL with an error
+# The crawler rejects date ranges to prevent data corruption from aggregation
+# Run dish_sales for ONE day at a time:
 python src/main.py --report dish_sales --date 2025-12-13
+
+# For cron jobs, run all reports for a SINGLE day (recommended):
+python src/main.py --report all --date $(date -d "yesterday" +%Y-%m-%d)
 
 # Force re-crawl (update existing records even if values unchanged)
 python src/main.py --force
@@ -92,19 +96,19 @@ tail -f logs/crawler_$(date +%Y%m%d).log
 
 ### Linux Deployment (Cron)
 
-**Run all crawlers daily at midnight, crawling 3 days back until yesterday:**
+**IMPORTANT: Machine Restart Handling**
+
+The crawler now uses a wrapper script (`run_crawler_with_cdp.sh`) that automatically handles machine restarts by:
+1. Checking if Chrome CDP is running
+2. Launching Chrome with CDP if needed
+3. Waiting for CDP to be ready before running the crawler
+
+This ensures the crawler works reliably even after system reboots.
+
+**Setup (Recommended):**
 
 ```bash
-# Manual cron setup - add to crontab -e
-# Runs at 00:00 daily, crawls 3 days back (e.g., Dec 15-17 if today is Dec 18)
-# Uses --report all to run both equity_package_sales and business_summary sequentially
-
-0 0 * * * cd /path/to/MtOfSmartICE && START=$(date -d "3 days ago" +\%Y-\%m-\%d) && END=$(date -d "yesterday" +\%Y-\%m-\%d) && python src/main.py --report all --date $START --end-date $END >> /tmp/meituan-crawler.log 2>&1
-```
-
-**Or use the setup script:**
-```bash
-# Auto-setup cron job
+# Auto-setup cron job with wrapper script
 ./scripts/setup_cron.sh
 
 # Verify cron is set
@@ -114,10 +118,35 @@ crontab -l
 tail -f /tmp/meituan-crawler.log
 ```
 
-**Important for cron:**
-- Chrome must be running with CDP enabled (port 9222)
-- User must be logged into 美团管家 in the Chrome session
-- Consider running Chrome in a tmux/screen session for persistence
+**Manual cron setup:**
+
+```bash
+# Add to crontab -e
+# Runs at 01:00 daily, crawls yesterday's data (single day)
+# Uses wrapper script to ensure Chrome CDP is running
+# IMPORTANT: Single day only - dish_sales does not support date ranges
+
+0 1 * * * /path/to/MtOfSmartICE/scripts/run_crawler_with_cdp.sh --report all --date $(date -d "yesterday" +\%Y-\%m-\%d)
+```
+
+**Test after machine restart:**
+
+```bash
+# Run comprehensive test
+./scripts/test_after_restart.sh
+
+# Or manually test
+./scripts/run_crawler_with_cdp.sh --report equity_package_sales --date $(date -d "yesterday" +%Y-%m-%d)
+```
+
+**Troubleshooting:**
+
+If the crawler fails after a reboot:
+1. Check if Chrome CDP is running: `curl http://localhost:9222/json/version`
+2. Check cron logs: `tail -50 /tmp/meituan-crawler.log`
+3. Run test script: `./scripts/test_after_restart.sh`
+4. Manually launch Chrome: `google-chrome --remote-debugging-port=9222 --user-data-dir=./data/chrome-profile --no-first-run --no-default-browser-check https://pos.meituan.com &`
+
 
 ## Architecture
 
